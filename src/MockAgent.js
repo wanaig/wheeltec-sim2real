@@ -161,23 +161,30 @@ export class MockAgent {
     const toolBenchY = +0.30;
     buildBench(toolBenchY);
 
-    // ── 过道 (两台之间, Y ±0.11, 宽22cm, 机械臂小车通道) ──
-    // 地面过道标识 (黄色, PlaneGeometry 在 Z-up 系中默认水平, 无需旋转)
+    // ── 机械臂小车大作业区 (覆盖双工作区, 底盘可自由选最近站位) ──
+    // 地面作业区标识 (黄色, PlaneGeometry 在 Z-up 系中默认水平, 无需旋转)
     const corridorMat = new THREE.MeshStandardMaterial({ color: 0xFFCC00, metalness: 0.3, roughness: 0.5, side: THREE.DoubleSide });
     const corridor = new THREE.Mesh(
-      new THREE.PlaneGeometry(benchW, 0.22), corridorMat);
+      new THREE.PlaneGeometry(0.95, 1.24), corridorMat);
     corridor.position.set(benchCx, 0, 0.001);  // 地面之上1mm
     this.scene.add(corridor);
-    // 过道两侧白色边线
-    for (const y of [-0.11, 0.11]) {
+    // 作业区边界白色边线
+    for (const y of [-0.62, 0.62]) {
       const line = new THREE.Mesh(
-        new THREE.PlaneGeometry(benchW, 0.008),
+        new THREE.PlaneGeometry(0.95, 0.008),
         new THREE.MeshStandardMaterial({ color: 0xFFFFFF, roughness: 0.6, side: THREE.DoubleSide }));
       line.position.set(benchCx, y, 0.0012);
       this.scene.add(line);
     }
-    // 过道标签
-    const corLbl = this._createLabel('机械臂过道', '#FFCC00');
+    for (const x of [-0.25, 0.70]) {
+      const line = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.008, 1.24),
+        new THREE.MeshStandardMaterial({ color: 0xFFFFFF, roughness: 0.6, side: THREE.DoubleSide }));
+      line.position.set(x, 0, 0.0012);
+      this.scene.add(line);
+    }
+    // 作业区标签
+    const corLbl = this._createLabel('机械臂小车作业区', '#FFCC00');
     corLbl.position.set(benchCx, 0, benchTopZ + 0.08);
     corLbl.scale.set(0.05, 0.010, 1);
     this.scene.add(corLbl);
@@ -390,8 +397,17 @@ export class MockAgent {
     { xMin: 0.15, xMax: 0.45, yMin: -0.49, yMax: -0.11 }, // 左台(料箱)
     { xMin: 0.15, xMax: 0.45, yMin: 0.11, yMax: 0.49 },   // 右台(工具)
   ];
-  // 过道安全Y范围
-  static CORRIDOR_Y = 0.08;
+  // 底盘可移动大作业区 (覆盖双工作台和中间区域, 但不能压到工作台本体)
+  static MOBILE_AREA = { xMin: -0.25, xMax: 0.70, yMin: -0.62, yMax: 0.62 };
+  static CHASSIS_RADIUS = 0.13;
+  static CHASSIS_CLEARANCE = 0.03;
+  static ARM_COMFORT_DIST = 0.28;
+
+  _isInMobileArea(x, y) {
+    const a = MockAgent.MOBILE_AREA;
+    const r = MockAgent.CHASSIS_RADIUS;
+    return x >= a.xMin + r && x <= a.xMax - r && y >= a.yMin + r && y <= a.yMax - r;
+  }
 
   /** 检查点是否在工作台占地范围内 */
   _isInBenchArea(x, y) {
@@ -402,59 +418,156 @@ export class MockAgent {
     return false;
   }
 
-  /** 计算底盘站位: Y限制在过道内, 只调X使臂够得着 */
-  _chassisGoalFor(xyz) {
-    // Y限制在过道, 保持臂从侧面/前方够到目标
-    const targetY = xyz[1];
-    // 如果目标Y在工作台内, 底盘Y限制在过道边缘
-    let chassisY = 0;
-    if (Math.abs(targetY) > MockAgent.CORRIDOR_Y) {
-      // 底盘停在过道, 靠近目标方向
-      chassisY = Math.sign(targetY) * MockAgent.CORRIDOR_Y * 0.8;
+  _isChassisPoseSafe(x, y) {
+    if (!this._isInMobileArea(x, y)) return false;
+    const m = MockAgent.CHASSIS_RADIUS + MockAgent.CHASSIS_CLEARANCE;
+    for (const f of MockAgent.BENCH_FOOTPRINTS) {
+      if (x >= f.xMin - m && x <= f.xMax + m &&
+          y >= f.yMin - m && y <= f.yMax + m) return false;
     }
-    // X: 使臂基座对准目标X, 但不进入工作台X范围前方太深
-    const targetX = xyz[0];
-    let chassisX = targetX - MockAgent.ARM_BASE[0];
-    // 确保底盘不穿入工作台 (X方向也留余量)
-    if (this._isInBenchArea(chassisX, chassisY)) {
-      // 如果仍在工作台范围, 退到工作台前方
-      chassisX = Math.max(chassisX, -0.05);
-    }
-    return [chassisX, chassisY, 0];
+    return true;
   }
 
-  /** A*路径规划: 避开工作台占地, 返回航点数组 */
+  _nearestSafeChassisPoint(x, y) {
+    if (this._isChassisPoseSafe(x, y)) return { x, y };
+    const step = 0.04;
+    let best = null;
+    for (let r = step; r <= 0.8; r += step) {
+      const n = Math.max(12, Math.ceil((2 * Math.PI * r) / step));
+      for (let i = 0; i < n; i++) {
+        const a = i * 2 * Math.PI / n;
+        const cx = x + Math.cos(a) * r;
+        const cy = y + Math.sin(a) * r;
+        if (!this._isChassisPoseSafe(cx, cy)) continue;
+        const score = Math.hypot(cx - x, cy - y);
+        if (!best || score < best.score) best = { x: cx, y: cy, score };
+      }
+      if (best) return best;
+    }
+    return null;
+  }
+
+  /** 计算底盘站位: 在大作业区内采样最近、可达、避开工作台的抓取站位 */
+  _chassisGoalFor(xyz) {
+    const cur = this.robot.root.position;
+    const armBase = new THREE.Vector3();
+    this.robot.jointGroups['joint1'].getWorldPosition(armBase);
+    const dz = xyz[2] - MockAgent.ARM_BASE[2];
+    const planarDist = Math.max(0.18, Math.min(0.34,
+      Math.sqrt(Math.max(0, MockAgent.ARM_COMFORT_DIST * MockAgent.ARM_COMFORT_DIST - dz * dz))));
+    const angles = [Math.atan2(armBase.y - xyz[1], armBase.x - xyz[0])];
+    for (let i = 0; i < 16; i++) angles.push(i * Math.PI / 8);
+
+    let best = null;
+    for (const a of angles) {
+      const armGoalX = xyz[0] + Math.cos(a) * planarDist;
+      const armGoalY = xyz[1] + Math.sin(a) * planarDist;
+      const yaw = Math.atan2(xyz[1] - armGoalY, xyz[0] - armGoalX);
+      const cos = Math.cos(yaw), sin = Math.sin(yaw);
+      const chassisX = armGoalX - (cos * MockAgent.ARM_BASE[0] - sin * MockAgent.ARM_BASE[1]);
+      const chassisY = armGoalY - (sin * MockAgent.ARM_BASE[0] + cos * MockAgent.ARM_BASE[1]);
+      if (!this._isChassisPoseSafe(chassisX, chassisY)) continue;
+      const score = Math.hypot(chassisX - cur.x, chassisY - cur.y);
+      if (!best || score < best.score) best = { x: chassisX, y: chassisY, yaw, score };
+    }
+
+    if (!best) {
+      const safe = this._nearestSafeChassisPoint(xyz[0] - MockAgent.ARM_BASE[0], xyz[1] - MockAgent.ARM_BASE[1]);
+      if (safe) return [safe.x, safe.y, 0];
+      return [this.robot.root.position.x, this.robot.root.position.y, this.robot.root.rotation.z];
+    }
+    return [best.x, best.y, best.yaw];
+  }
+
+  /** A*路径规划: 使用底盘footprint避开工作台占地, 返回航点数组 */
   _planChassisPath(targetX, targetY) {
     const start = { x: this.robot.root.position.x, y: this.robot.root.position.y };
-    const goal = { x: targetX, y: targetY };
-    // 如果直线不穿工作台, 直接走
-    if (!this._pathIntersectsBench(start, goal)) {
-      return [goal];
+    const safeGoal = this._nearestSafeChassisPoint(targetX, targetY);
+    if (!safeGoal) return [start];
+    const goal = { x: safeGoal.x, y: safeGoal.y };
+    if (Math.hypot(goal.x - targetX, goal.y - targetY) > 0.01) {
+      this._log(`[chassis] 目标站位碰撞, 改到最近安全点 (${goal.x.toFixed(2)}, ${goal.y.toFixed(2)})`);
     }
-    // 穿工作台 → 经过过道中点绕行
-    const corridorPoint = { x: (start.x + goal.x) / 2, y: 0 };
-    // 确保绕行点不在工作台内
-    if (this._isInBenchArea(corridorPoint.x, corridorPoint.y)) {
-      corridorPoint.y = 0;
-      corridorPoint.x = Math.min(corridorPoint.x, -0.02);
+    if (this._segmentChassisSafe(start, goal)) return [goal];
+
+    const res = 0.04;
+    const area = MockAgent.MOBILE_AREA;
+    const ix = (x) => Math.round((x - area.xMin) / res);
+    const iy = (y) => Math.round((y - area.yMin) / res);
+    const wx = (i) => area.xMin + i * res;
+    const wy = (i) => area.yMin + i * res;
+    const sx = ix(start.x), sy = iy(start.y);
+    const gx = ix(goal.x), gy = iy(goal.y);
+    const key = (x, y) => `${x},${y}`;
+    const open = [{ x: sx, y: sy, g: 0, f: Math.hypot(gx - sx, gy - sy) }];
+    const came = new Map();
+    const cost = new Map([[key(sx, sy), 0]]);
+    const closed = new Set();
+    const dirs = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+
+    while (open.length) {
+      open.sort((a, b) => a.f - b.f);
+      const cur = open.shift();
+      const ck = key(cur.x, cur.y);
+      if (closed.has(ck)) continue;
+      closed.add(ck);
+      if (cur.x === gx && cur.y === gy) break;
+      for (const [dx, dy] of dirs) {
+        const nx = cur.x + dx, ny = cur.y + dy;
+        const px = wx(nx), py = wy(ny);
+        if (!this._isChassisPoseSafe(px, py)) continue;
+        const nk = key(nx, ny);
+        const ng = cur.g + Math.hypot(dx, dy);
+        if (ng >= (cost.get(nk) ?? Infinity)) continue;
+        cost.set(nk, ng);
+        came.set(nk, ck);
+        open.push({ x: nx, y: ny, g: ng, f: ng + Math.hypot(gx - nx, gy - ny) });
+      }
     }
-    return [corridorPoint, goal];
+
+    const gk = key(gx, gy);
+    if (!came.has(gk)) {
+      this._log('[chassis] A*未找到完整路径, 保持当前位置');
+      return [start];
+    }
+    const cells = [];
+    let k = gk;
+    while (k && k !== key(sx, sy)) {
+      const [cx, cy] = k.split(',').map(Number);
+      cells.push({ x: wx(cx), y: wy(cy) });
+      k = came.get(k);
+    }
+    cells.reverse();
+    return this._simplifyChassisPath([start, ...cells]);
   }
 
-  /** 线段是否穿过工作台 */
-  _pathIntersectsBench(p1, p2) {
-    // 起点和终点都在过道内 → 直线安全, 无需绕行
-    if (Math.abs(p1.y) <= 0.11 && Math.abs(p2.y) <= 0.11) {
-      return false;
-    }
-    // 采样10个点检查
-    for (let i = 0; i <= 10; i++) {
-      const t = i / 10;
+  _segmentChassisSafe(p1, p2) {
+    const samples = Math.max(2, Math.ceil(Math.hypot(p2.x - p1.x, p2.y - p1.y) / 0.02));
+    for (let i = 0; i <= samples; i++) {
+      const t = i / samples;
       const x = p1.x + (p2.x - p1.x) * t;
       const y = p1.y + (p2.y - p1.y) * t;
-      if (this._isInBenchArea(x, y)) return true;
+      if (!this._isChassisPoseSafe(x, y)) return false;
     }
-    return false;
+    return true;
+  }
+
+  _simplifyChassisPath(points) {
+    if (points.length <= 2) return points.slice(1);
+    const out = [];
+    let anchor = points[0];
+    let i = 1;
+    while (i < points.length) {
+      let furthest = i;
+      for (let j = i; j < points.length; j++) {
+        if (this._segmentChassisSafe(anchor, points[j])) furthest = j;
+        else break;
+      }
+      out.push(points[furthest]);
+      anchor = points[furthest];
+      i = furthest + 1;
+    }
+    return out;
   }
 
   _buildPlan(action, targetXyz, slotXyz) {
@@ -463,9 +576,11 @@ export class MockAgent {
 
     // 辅助: 检查从当前底盘位置能否到达目标
     const reachable = (xyz) => {
-      const armX = this.robot.root.position.x + MockAgent.ARM_BASE[0];
-      const armY = this.robot.root.position.y + MockAgent.ARM_BASE[1];
-      const armZ = MockAgent.ARM_BASE[2];
+      const armBase = new THREE.Vector3();
+      this.robot.jointGroups['joint1'].getWorldPosition(armBase);
+      const armX = armBase.x;
+      const armY = armBase.y;
+      const armZ = armBase.z;
       const d = Math.hypot(xyz[0] - armX, xyz[1] - armY, xyz[2] - armZ);
       return d <= MockAgent.ARM_REACH;
     };
@@ -589,8 +704,8 @@ export class MockAgent {
     for (let i = 0; i < waypoints.length; i++) {
       const wp = waypoints[i];
       const isLast = i === waypoints.length - 1;
-      const targetX = isLast ? x : wp.x;
-      const targetY = isLast ? y : wp.y;
+      const targetX = wp.x;
+      const targetY = wp.y;
       const targetYaw = isLast ? yaw : Math.atan2(targetY - root.position.y, targetX - root.position.x);
       const segDur = duration / waypoints.length;
       const startX = root.position.x;

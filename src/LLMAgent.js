@@ -23,8 +23,9 @@ import { MCP_TOOLS } from './MCPTools.js';
 const SYSTEM_PROMPT = `你是一个工业机械臂小车的自主作业智能体, 控制一台 WHEELTEC R550A 机械臂小车 (5-DOF臂+夹爪, 4WD底盘)。
 
 ## 场景描述
-- 双工作台: 左台料箱(3格, slot1靠近过道), 右台工具, 中间过道(22cm)
-- 工作台X范围[0.15,0.45], 左台Y[-0.49,-0.11], 右台Y[0.11,0.49], 过道Y[-0.11,0.11]
+- 双工作台: 左台料箱(3格), 右台工具, 机械臂小车大作业区覆盖两个工作区和中间区域
+- 工作台X范围[0.15,0.45], 左台Y[-0.49,-0.11], 右台Y[0.11,0.49]
+- 底盘可在大作业区内自由移动并规划最近路径, 但必须按小车footprint避开工作台; 优先使用工具返回的 suggested_chassis
 - 机械臂臂展0.40m, 基座[0.054, 0.001, 0.156]
 
 ## MCP 工具 (共9个)
@@ -61,7 +62,7 @@ perceive, get_scene_info, get_robot_state, move_base, plan_arm_motion, grasp, re
 - ★ plan_arm_motion 直接传目标坐标即可, 规划器自动经安全高度绕行, 无需先到上方
 - ★ perceive/plan_arm_motion 返回 suggested_chassis 时, 直接 move_base 到该坐标
 - ★ 抓取后必须 retract, 放置后必须 retract, move_base 前必须 retract
-- ★ 底盘Y必须在过道内 |Y| ≤ 0.08
+- ★ 底盘不再限制在窄过道内, 可进入覆盖双工作区的大作业区; move_base 会按小车footprint避障并优先走最近可达站位
 - 可以在同一轮调用多个无依赖的工具 (如 perceive + get_scene_info)
 
 ## 失败恢复

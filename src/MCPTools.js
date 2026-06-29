@@ -28,6 +28,13 @@ const COLLISION_BOXES = [
   { name: 'tool_bench', x: [0.15, 0.45], y: [0.11, 0.49], z: [0.040, 0.115] },
 ];
 
+const ARM_BASE_OFFSET = { x: 0.054476, y: 0.00070272, z: 0.156 };
+const ARM_REACH = 0.40;
+const ARM_COMFORT_DIST = 0.28;
+const MOBILE_AREA = { xMin: -0.25, xMax: 0.70, yMin: -0.62, yMax: 0.62 };
+const CHASSIS_RADIUS = 0.13;
+const CHASSIS_CLEARANCE = 0.03;
+
 /** 检查点是否在碰撞盒内 */
 function _pointInBox(x, y, z, box) {
   return x >= box.x[0] && x <= box.x[1] &&
@@ -98,6 +105,33 @@ function _checkTrajectoryCollision(robot, fromJoints, toJoints, samples = 20) {
   robot.applyJointState(names, saved);
   robot.collisionEnabled = wasEnabled;
   return { collision: collisionFound, safeHeight: maxZ };
+}
+
+function _wrapAngle(rad) {
+  return Math.atan2(Math.sin(rad), Math.cos(rad));
+}
+
+function _jointDistance(a, b) {
+  let sum = 0;
+  for (const n of ARM_JOINT_NAMES) {
+    const d = _wrapAngle((a[n] ?? 0) - (b[n] ?? 0));
+    sum += d * d;
+  }
+  return Math.sqrt(sum);
+}
+
+function _inMobileArea(x, y) {
+  const r = CHASSIS_RADIUS;
+  return y >= MOBILE_AREA.yMin + r && y <= MOBILE_AREA.yMax - r &&
+         x >= MOBILE_AREA.xMin + r && x <= MOBILE_AREA.xMax - r;
+}
+
+function _inBenchFootprint(x, y, margin = CHASSIS_RADIUS + CHASSIS_CLEARANCE) {
+  for (const box of COLLISION_BOXES) {
+    if (x >= box.x[0] - margin && x <= box.x[1] + margin &&
+        y >= box.y[0] - margin && y <= box.y[1] + margin) return true;
+  }
+  return false;
 }
 
 // ─────────────── MCP 工具定义 (OpenAI function calling 格式) ───────────────
@@ -225,6 +259,47 @@ export class MCPToolExecutor {
   onLog(cb) { this._logCb = cb; }
   _log(msg) { if (this._logCb) this._logCb(msg); }
 
+  _suggestChassisFor(target) {
+    const cur = this.robot.root.position;
+    const curYaw = this.robot.root.rotation.z;
+    const armBase = new THREE.Vector3();
+    this.robot.jointGroups['joint1'].getWorldPosition(armBase);
+    const dz = target.z - ARM_BASE_OFFSET.z;
+    const planarDist = Math.max(0.18, Math.min(0.34,
+      Math.sqrt(Math.max(0, ARM_COMFORT_DIST * ARM_COMFORT_DIST - dz * dz))));
+    const angles = [];
+    const currentSide = Math.atan2(armBase.y - target.y, armBase.x - target.x);
+    angles.push(currentSide);
+    for (let i = 0; i < 16; i++) angles.push(i * Math.PI / 8);
+
+    let best = null;
+    for (const a of angles) {
+      const armGoalX = target.x + Math.cos(a) * planarDist;
+      const armGoalY = target.y + Math.sin(a) * planarDist;
+      const yaw = Math.atan2(target.y - armGoalY, target.x - armGoalX);
+      const cos = Math.cos(yaw), sin = Math.sin(yaw);
+      const x = armGoalX - (cos * ARM_BASE_OFFSET.x - sin * ARM_BASE_OFFSET.y);
+      const y = armGoalY - (sin * ARM_BASE_OFFSET.x + cos * ARM_BASE_OFFSET.y);
+      if (!_inMobileArea(x, y) || _inBenchFootprint(x, y)) continue;
+
+      const armDistance = Math.hypot(target.x - armGoalX, target.y - armGoalY, target.z - ARM_BASE_OFFSET.z);
+      if (armDistance > ARM_REACH) continue;
+      const travel = Math.hypot(x - cur.x, y - cur.y);
+      const turn = Math.abs(_wrapAngle(yaw - curYaw)) * 0.05;
+      const score = travel + turn;
+      if (!best || score < best.score) best = { x, y, yaw, score };
+    }
+
+    if (!best) {
+      best = {
+        x: Math.max(MOBILE_AREA.xMin, Math.min(MOBILE_AREA.xMax, target.x - ARM_BASE_OFFSET.x)),
+        y: Math.max(MOBILE_AREA.yMin, Math.min(MOBILE_AREA.yMax, target.y - ARM_BASE_OFFSET.y)),
+        yaw: 0,
+      };
+    }
+    return { x: +best.x.toFixed(3), y: +best.y.toFixed(3), yaw: +best.yaw.toFixed(3) };
+  }
+
   /**
    * 执行工具调用
    * @param {string} name — 工具名
@@ -261,14 +336,16 @@ export class MCPToolExecutor {
   // ── perceive ──
   _perceive() {
     const objs = this.agent._perceive();
-    const armX = this.robot.root.position.x + 0.054;
-    const armY = this.robot.root.position.y + 0.001;
-    const armZ = 0.156;
+    const armBase = new THREE.Vector3();
+    this.robot.jointGroups['joint1'].getWorldPosition(armBase);
+    const armX = armBase.x;
+    const armY = armBase.y;
+    const armZ = armBase.z;
     return {
       ok: true,
       objects: objs.map(o => {
         const dist = Math.hypot(o.xyz[0] - armX, o.xyz[1] - armY, o.xyz[2] - armZ);
-        const reachable = dist <= 0.40;
+        const reachable = dist <= ARM_REACH;
         const obj = {
           class: o.class,
           position: { x: +o.xyz[0].toFixed(3), y: +o.xyz[1].toFixed(3), z: +o.xyz[2].toFixed(3) },
@@ -277,9 +354,7 @@ export class MCPToolExecutor {
           reachable,
         };
         if (!reachable) {
-          const sx = o.xyz[0] - 0.054;
-          const sy = Math.max(-0.08, Math.min(0.08, o.xyz[1] * 0.25));
-          obj.suggested_chassis = { x: +sx.toFixed(3), y: +sy.toFixed(3), yaw: 0 };
+          obj.suggested_chassis = this._suggestChassisFor(new THREE.Vector3(o.xyz[0], o.xyz[1], o.xyz[2]));
         }
         return obj;
       }),
@@ -300,7 +375,7 @@ export class MCPToolExecutor {
   }
 
   // ── 多起始点IK求解 (预旋转joint1面朝目标 + 多planar起始姿态) ──
-  _multiStartIK(target) {
+  _multiStartIK(target, preferred = null) {
     const cur = {};
     ARM_JOINT_NAMES.forEach(j => cur[j] = this.robot.getJoint(j));
 
@@ -321,6 +396,7 @@ export class MCPToolExecutor {
     ];
 
     let best = null;
+    let bestSolved = null;
     for (const sp of startPoints) {
       this.robot.applyJointState(ARM_JOINT_NAMES,
         ARM_JOINT_NAMES.map(j => sp.joints[j] ?? 0));
@@ -329,9 +405,15 @@ export class MCPToolExecutor {
       ARM_JOINT_NAMES.forEach(j => joints[j] = this.robot.getJoint(j));
 
       if (result.solved) {
-        this.robot.applyJointState(ARM_JOINT_NAMES,
-          ARM_JOINT_NAMES.map(j => cur[j]));
-        return { solved: true, error: result.error, joints, start: sp.name };
+        const solved = { solved: true, error: result.error, joints, start: sp.name };
+        if (!preferred) {
+          this.robot.applyJointState(ARM_JOINT_NAMES,
+            ARM_JOINT_NAMES.map(j => cur[j]));
+          return solved;
+        }
+        solved.distance = _jointDistance(joints, preferred);
+        if (!bestSolved || solved.distance < bestSolved.distance) bestSolved = solved;
+        continue;
       }
       if (!best || result.error < best.error) {
         best = { solved: false, error: result.error, joints, start: sp.name };
@@ -339,6 +421,7 @@ export class MCPToolExecutor {
     }
     this.robot.applyJointState(ARM_JOINT_NAMES,
       ARM_JOINT_NAMES.map(j => cur[j]));
+    if (bestSolved) return bestSolved;
     return best;
   }
 
@@ -354,14 +437,13 @@ export class MCPToolExecutor {
 
     if (!ikResult.solved) {
       this._log(`[MCP] IK失败: 误差${(ikResult.error * 1000).toFixed(1)}mm (from ${ikResult.start})`);
-      const sx = target.x - 0.054;
-      const sy = Math.max(-0.08, Math.min(0.08, target.y * 0.25));
+      const suggested = this._suggestChassisFor(target);
       return {
         ok: false, reason: 'ik_unreachable',
         detail: `IK求解失败(多起始点), 最小误差${(ikResult.error * 1000).toFixed(1)}mm (from ${ikResult.start})`,
         error_mm: +(ikResult.error * 1000).toFixed(1),
-        suggested_chassis: { x: +sx.toFixed(3), y: +sy.toFixed(3), yaw: 0 },
-        hint: `建议先move_base到(${sx.toFixed(2)}, ${sy.toFixed(2)})再重试`,
+        suggested_chassis: suggested,
+        hint: `建议先move_base到(${suggested.x.toFixed(2)}, ${suggested.y.toFixed(2)}, yaw=${suggested.yaw.toFixed(2)})再重试`,
       };
     }
 
@@ -381,13 +463,13 @@ export class MCPToolExecutor {
     const safeZ = Math.max(tcpNow.z, target.z + 0.06, 0.14);
 
     // Via1: 当前位置抬升到安全高度
-    const r1 = this._multiStartIK(new THREE.Vector3(tcpNow.x, tcpNow.y, safeZ));
+    const r1 = this._multiStartIK(new THREE.Vector3(tcpNow.x, tcpNow.y, safeZ), cur);
     const via1Joints = r1.solved ? {} : null;
     if (via1Joints) ARM_JOINT_NAMES.forEach(j => via1Joints[j] = Math.atan2(
       Math.sin(r1.joints[j]), Math.cos(r1.joints[j])));
 
     // Via2: 目标正上方安全高度
-    const r2 = this._multiStartIK(new THREE.Vector3(target.x, target.y, safeZ));
+    const r2 = this._multiStartIK(new THREE.Vector3(target.x, target.y, safeZ), via1Joints || cur);
     const via2Joints = r2.solved ? {} : null;
     if (via2Joints) ARM_JOINT_NAMES.forEach(j => via2Joints[j] = Math.atan2(
       Math.sin(r2.joints[j]), Math.cos(r2.joints[j])));
@@ -527,13 +609,14 @@ export class MCPToolExecutor {
   _getSceneInfo() {
     return {
       ok: true,
-      arm_base_offset: { x: 0.054, y: 0.001, z: 0.156 },
-      arm_reach_m: 0.40,
+      arm_base_offset: { x: ARM_BASE_OFFSET.x, y: ARM_BASE_OFFSET.y, z: ARM_BASE_OFFSET.z },
+      arm_reach_m: ARM_REACH,
       workbenches: {
         bin_bench: { center: [0.30, -0.30], y_range: [-0.49, -0.11], x_range: [0.15, 0.45], z_range: [0.04, 0.115] },
         tool_bench: { center: [0.30, 0.30], y_range: [0.11, 0.49], x_range: [0.15, 0.45], z_range: [0.04, 0.115] },
-        corridor: { y_range: [-0.11, 0.11], width_m: 0.22 },
+        mobile_area: { x_range: [MOBILE_AREA.xMin, MOBILE_AREA.xMax], y_range: [MOBILE_AREA.yMin, MOBILE_AREA.yMax], note: '底盘可在覆盖双工作区的大作业区内自由移动, 路径规划会按底盘footprint避开工作台' },
       },
+      chassis_safety: { radius_m: CHASSIS_RADIUS, clearance_m: CHASSIS_CLEARANCE },
       collision_boxes: COLLISION_BOXES.map(b => ({
         name: b.name, x: b.x, y: b.y, z: b.z,
       })),
@@ -542,7 +625,7 @@ export class MCPToolExecutor {
       ),
       bench_top_z: 0.060,
       safe_height_z: 0.14,
-      planning_note: '臂移动时不能穿入工作台碰撞盒。规划会自动检测路径碰撞, 必要时经安全高度绕行。',
+      planning_note: '底盘站位按最近可达点规划, 并按底盘半径+安全间隙避开工作台; 臂移动时不能穿入工作台碰撞盒, 必要时经安全高度绕行。',
     };
   }
 }
