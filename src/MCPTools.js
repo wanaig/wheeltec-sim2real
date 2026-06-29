@@ -44,6 +44,9 @@ const ARM_COMFORT_DIST = 0.28;
 const MOBILE_AREA = { xMin: -0.25, xMax: 0.70, yMin: -0.62, yMax: 0.62 };
 const CHASSIS_RADIUS = 0.13;
 const CHASSIS_CLEARANCE = 0.03;
+const WORKBENCH_FRONT_STANDOFF = 0.12;
+const MAX_FRONT_APPROACH_ANGLE = 1.25; // 约72°, 禁止侧后方/背向工作台操作
+const MAX_WORKBENCH_LATERAL_OFFSET = 0.16;
 
 /** 检查点是否在碰撞盒内 */
 function _pointInBox(x, y, z, box) {
@@ -167,6 +170,18 @@ function _inBenchFootprint(x, y, margin = CHASSIS_RADIUS + CHASSIS_CLEARANCE) {
         y >= box.y[0] - margin && y <= box.y[1] + margin) return true;
   }
   return false;
+}
+
+function _isWorkbenchTarget(target) {
+  return target.x >= 0.20 && target.x <= 0.40 &&
+         ((target.y >= 0.11 && target.y <= 0.49) || (target.y >= -0.49 && target.y <= -0.11)) &&
+         target.z >= 0.04 && target.z <= 0.16;
+}
+
+function _frontApproachAngles(target) {
+  if (!_isWorkbenchTarget(target)) return null;
+  // 工作台只能从正面(x较小的一侧)接近, 允许少量斜向误差, 禁止绕到侧后方/背面。
+  return [Math.PI, Math.PI - Math.PI / 10, Math.PI + Math.PI / 10];
 }
 
 // ─────────────── MCP 工具定义 (OpenAI function calling 格式) ───────────────
@@ -303,10 +318,15 @@ export class MCPToolExecutor {
     const dz = target.z - ARM_BASE_OFFSET.z;
     const planarDist = Math.max(0.18, Math.min(0.34,
       Math.sqrt(Math.max(0, ARM_COMFORT_DIST * ARM_COMFORT_DIST - dz * dz))));
+    const fixedFrontAngles = _frontApproachAngles(target);
     const angles = [];
     const currentSide = Math.atan2(armBase.y - target.y, armBase.x - target.x);
-    angles.push(currentSide);
-    for (let i = 0; i < 16; i++) angles.push(i * Math.PI / 8);
+    if (fixedFrontAngles) {
+      angles.push(...fixedFrontAngles);
+    } else {
+      angles.push(currentSide);
+      for (let i = 0; i < 16; i++) angles.push(i * Math.PI / 8);
+    }
 
     // 保存机器人状态 (碰撞验证会修改底盘位姿和关节)
     const svPos = { x: cur.x, y: cur.y, z: this.robot.root.position.z };
@@ -318,8 +338,9 @@ export class MCPToolExecutor {
     let bestAny = null;    // 任意候选 (fallback)
 
     for (const a of angles) {
-      const armGoalX = target.x + Math.cos(a) * planarDist;
-      const armGoalY = target.y + Math.sin(a) * planarDist;
+      const standoff = fixedFrontAngles ? Math.max(planarDist, WORKBENCH_FRONT_STANDOFF) : planarDist;
+      const armGoalX = target.x + Math.cos(a) * standoff;
+      const armGoalY = target.y + Math.sin(a) * standoff;
       const yaw = Math.atan2(target.y - armGoalY, target.x - armGoalX);
       const cos = Math.cos(yaw), sin = Math.sin(yaw);
       const x = armGoalX - (cos * ARM_BASE_OFFSET.x - sin * ARM_BASE_OFFSET.y);
@@ -348,6 +369,7 @@ export class MCPToolExecutor {
       const v2J = {};
       ARM_JOINT_NAMES.forEach(j => v2J[j] = Math.atan2(
         Math.sin(r2.joints[j]), Math.cos(r2.joints[j])));
+      if (fixedFrontAngles && Math.abs(v2J.joint1 ?? 0) > MAX_FRONT_APPROACH_ANGLE) continue;
 
       // Target IK (preferred: via2 → 同分支, 下降更垂直, 减少料箱壁碰撞)
       const ikRes = this._multiStartIK(target, v2J);
@@ -355,6 +377,7 @@ export class MCPToolExecutor {
       const ikJ = {};
       ARM_JOINT_NAMES.forEach(j => ikJ[j] = Math.atan2(
         Math.sin(ikRes.joints[j]), Math.cos(ikRes.joints[j])));
+      if (fixedFrontAngles && Math.abs(ikJ.joint1 ?? 0) > MAX_FRONT_APPROACH_ANGLE) continue;
 
       // 目标姿态碰撞 (两种夹爪)
       let goalHit = null;
@@ -395,6 +418,17 @@ export class MCPToolExecutor {
       };
     }
 
+    if (fixedFrontAngles) {
+      const standoff = Math.max(planarDist, WORKBENCH_FRONT_STANDOFF);
+      const yaw = 0;
+      const cos = Math.cos(yaw), sin = Math.sin(yaw);
+      const armGoalX = target.x - standoff;
+      const armGoalY = target.y;
+      const x = armGoalX - (cos * ARM_BASE_OFFSET.x - sin * ARM_BASE_OFFSET.y);
+      const y = armGoalY - (sin * ARM_BASE_OFFSET.x + cos * ARM_BASE_OFFSET.y);
+      return { x: +x.toFixed(3), y: +y.toFixed(3), yaw: 0, no_collision_free: true };
+    }
+
     // Fallback: 环形搜索安全站位 (不进入工作台占地)
     for (let r = 0.10; r <= 0.80; r += 0.04) {
       const n = Math.max(16, Math.ceil(2 * Math.PI * r / 0.04));
@@ -416,6 +450,29 @@ export class MCPToolExecutor {
       yaw: 0,
       no_collision_free: true,
     };
+  }
+
+  _validateWorkbenchApproach(target) {
+    if (!_isWorkbenchTarget(target)) return null;
+    const armBase = new THREE.Vector3();
+    this.robot.jointGroups['joint1'].getWorldPosition(armBase);
+    const baseToTargetYaw = Math.atan2(target.y - armBase.y, target.x - armBase.x);
+    const relYaw = _wrapAngle(baseToTargetYaw - this.robot.root.rotation.z);
+    const frontClearance = target.x - armBase.x;
+    const lateralOffset = Math.abs(target.y - armBase.y);
+    if (frontClearance < WORKBENCH_FRONT_STANDOFF ||
+        lateralOffset > MAX_WORKBENCH_LATERAL_OFFSET ||
+        Math.abs(relYaw) > MAX_FRONT_APPROACH_ANGLE) {
+      const suggested = this._suggestChassisFor(target);
+      return {
+        ok: false,
+        reason: 'unsafe_approach',
+        detail: `禁止从侧后方/背向/跨工作台操作: arm_base=(${armBase.x.toFixed(3)}, ${armBase.y.toFixed(3)}), target=(${target.x.toFixed(3)}, ${target.y.toFixed(3)}), lateral=${lateralOffset.toFixed(3)}m, relative_yaw=${relYaw.toFixed(2)}rad`,
+        suggested_chassis: suggested,
+        hint: `请先move_base到(${suggested.x.toFixed(2)}, ${suggested.y.toFixed(2)}, yaw=${suggested.yaw.toFixed(2)})，使车头正对工作台后再规划机械臂`,
+      };
+    }
+    return null;
   }
 
   /**
@@ -594,6 +651,8 @@ export class MCPToolExecutor {
   // ── plan_arm_motion (MoveIt2: 多起始IK + 碰撞检测 + 经由点轨迹 + 自动执行) ──
   async _planArmMotion(p) {
     const target = new THREE.Vector3(p.x, p.y, p.z);
+    const approachError = this._validateWorkbenchApproach(target);
+    if (approachError) return approachError;
     const cur = {};
     ARM_JOINT_NAMES.forEach(j => cur[j] = this.robot.getJoint(j));
     const tcpNow = this.robot.getGripperTCP();
@@ -631,6 +690,16 @@ export class MCPToolExecutor {
       Math.sin(ikResult.joints[j]), Math.cos(ikResult.joints[j])));
     if (!_jointsWithinLimits(this.robot, ikJoints)) {
       return { ok: false, reason: 'joint_limit', detail: '目标姿态超出URDF关节角度限制' };
+    }
+    if (_isWorkbenchTarget(target) && Math.abs(ikJoints.joint1 ?? 0) > MAX_FRONT_APPROACH_ANGLE) {
+      const suggested = this._suggestChassisFor(target);
+      return {
+        ok: false,
+        reason: 'unsafe_arm_orientation',
+        detail: `禁止机械臂底座大角度横摆操作工作台目标: joint1=${ikJoints.joint1.toFixed(2)}rad`,
+        suggested_chassis: suggested,
+        hint: `请先move_base到(${suggested.x.toFixed(2)}, ${suggested.y.toFixed(2)}, yaw=${suggested.yaw.toFixed(2)})，再重新规划`,
+      };
     }
 
     // 4. 检查目标姿态碰撞
