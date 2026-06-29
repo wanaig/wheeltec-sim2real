@@ -78,7 +78,9 @@ perceive, get_scene_info, get_robot_state, move_base, plan_arm_motion, grasp, re
 - move_base 失败 (path_not_found): 目标站位太近或不可达, 换一个不同角度的站位重试
 - move_base 失败 (arm_stuck): 先 release 再 retract, 然后重试 move_base
 - grasp失败: 偏移抓取点
-- ★ 系统会自动检测重复调用和连续失败, 连续5次失败将自动终止对话
+- ★ move_base 成功后可以重试 plan_arm_motion (站位已变, 不算重复调用)
+- ★ 同一目标 plan_arm_motion 失败3次后系统自动终止; 失败2次后应主动换目标
+- ★ 连续5次工具失败自动终止 (move_base 成功不重置计数)
 - 最多重试4次, 超过后总结失败原因并结束
 
 ## 输出要求
@@ -202,6 +204,11 @@ export class LLMAgent {
           this._callHistory.push(callKey);
           if (this._callHistory.length > 20) this._callHistory.shift();
           result = await this.executor.execute(toolName, params);
+          // move_base 成功后机器人状态已变, 清除调用历史
+          // (允许从新站位重试同参数 plan_arm_motion, 不算重复)
+          if (toolName === 'move_base' && result.ok) {
+            this._callHistory = [];
+          }
         }
 
         // 连续失败追踪
@@ -217,9 +224,13 @@ export class LLMAgent {
             }
           }
         } else {
-          this._failCount = 0;
-          this._planFailTarget = null;
-          this._planFailCount = 0;
+          // move_base 成功不算"进展"(只是换站位), 不重置失败计数
+          // 只有实际操作 (plan_arm_motion/grasp/release/retract/verify) 成功才重置
+          if (toolName !== 'move_base') {
+            this._failCount = 0;
+            this._planFailTarget = null;
+            this._planFailCount = 0;
+          }
         }
 
         // 构建工具结果 (失败达阈值时追加警告)
@@ -237,6 +248,16 @@ export class LLMAgent {
           tool_call_id: tc.id,
           content,
         });
+
+        // 熔断: 同一目标 plan_arm_motion 失败3次 → 终止 (不管 move_base 是否成功)
+        if (this._planFailCount >= 3) {
+          this._log(`[LLM] 同一目标(${this._planFailTarget})plan_arm_motion失败${this._planFailCount}次, 自动终止`);
+          return {
+            ok: false,
+            summary: `目标(${this._planFailTarget})无法到达: 碰撞或不可达, 已尝试${this._planFailCount}次`,
+            turns,
+          };
+        }
 
         // 熔断: 连续失败达上限 → 终止
         if (this._failCount >= MAX_CONSECUTIVE_FAILURES) {

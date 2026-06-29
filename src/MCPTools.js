@@ -332,14 +332,25 @@ export class MCPToolExecutor {
       const score = travel + turn;
       if (!bestAny || score < bestAny.score) bestAny = { x, y, yaw, score };
 
-      // 碰撞验证: 模拟底盘到位, IK求解 + 下降段碰撞检测 (与 plan_arm_motion c3 一致)
+      // 碰撞验证: 模拟底盘到位, IK求解 + 下降段碰撞检测 (与 plan_arm_motion 一致)
       this.robot.root.position.set(x, y, 0);
       this.robot.root.rotation.z = yaw;
       this.robot.root.updateMatrixWorld(true);
 
+      // 恢复保存的臂状态 (与 plan_arm_motion 的 IK 起始点一致, 避免解分支不一致)
       this.robot.applyJointState(ARM_JOINT_NAMES,
-        ARM_JOINT_NAMES.map(j => PRESETS.arm_place[j] ?? 0));
-      const ikRes = this._multiStartIK(target);
+        ARM_JOINT_NAMES.map(j => svArm[j]));
+
+      // Via2: 目标正上方安全高度 (先求解, 用作 target IK 的 preferred → 同分支解)
+      const safeZ = Math.max(target.z + 0.06, 0.14);
+      const r2 = this._multiStartIK(new THREE.Vector3(target.x, target.y, safeZ), svArm);
+      if (!r2.solved) continue;
+      const v2J = {};
+      ARM_JOINT_NAMES.forEach(j => v2J[j] = Math.atan2(
+        Math.sin(r2.joints[j]), Math.cos(r2.joints[j])));
+
+      // Target IK (preferred: via2 → 同分支, 下降更垂直, 减少料箱壁碰撞)
+      const ikRes = this._multiStartIK(target, v2J);
       if (!ikRes.solved) continue;
       const ikJ = {};
       ARM_JOINT_NAMES.forEach(j => ikJ[j] = Math.atan2(
@@ -355,16 +366,6 @@ export class MCPToolExecutor {
         if (hit) { goalHit = hit; break; }
       }
       if (goalHit) continue;
-
-      // Via2: 目标正上方安全高度
-      const safeZ = Math.max(target.z + 0.06, 0.14);
-      this.robot.applyJointState(ARM_JOINT_NAMES,
-        ARM_JOINT_NAMES.map(j => PRESETS.arm_place[j] ?? 0));
-      const r2 = this._multiStartIK(new THREE.Vector3(target.x, target.y, safeZ));
-      if (!r2.solved) continue;
-      const v2J = {};
-      ARM_JOINT_NAMES.forEach(j => v2J[j] = Math.atan2(
-        Math.sin(r2.joints[j]), Math.cos(r2.joints[j])));
 
       // C3 下降轨迹碰撞 (两种夹爪, 与 plan_arm_motion 完全一致)
       let c3Hit = null;
@@ -597,8 +598,19 @@ export class MCPToolExecutor {
     ARM_JOINT_NAMES.forEach(j => cur[j] = this.robot.getJoint(j));
     const tcpNow = this.robot.getGripperTCP();
 
-    // 1. 多起始点 IK 求解
-    const ikResult = this._multiStartIK(target);
+    // 1. 安全高度 (高于工作台和料箱壁)
+    const safeZ = Math.max(tcpNow.z, target.z + 0.06, 0.14);
+
+    // 2. Via2: 目标正上方安全高度 (先求解, 用作 target IK 的 preferred → 同分支解, 下降更垂直)
+    const r2 = this._multiStartIK(new THREE.Vector3(target.x, target.y, safeZ), cur);
+    const via2Joints = r2.solved ? {} : null;
+    if (via2Joints) ARM_JOINT_NAMES.forEach(j => via2Joints[j] = Math.atan2(
+      Math.sin(r2.joints[j]), Math.cos(r2.joints[j])));
+
+    // 3. 多起始点 IK 求解 (preferred: via2 → 同分支, 确保下降段垂直, 减少料箱壁碰撞)
+    const ikResult = via2Joints
+      ? this._multiStartIK(target, via2Joints)
+      : this._multiStartIK(target);
 
     if (!ikResult.solved) {
       this._log(`[MCP] IK失败: 误差${(ikResult.error * 1000).toFixed(1)}mm (from ${ikResult.start})`);
@@ -621,7 +633,7 @@ export class MCPToolExecutor {
       return { ok: false, reason: 'joint_limit', detail: '目标姿态超出URDF关节角度限制' };
     }
 
-    // 2. 检查目标姿态碰撞
+    // 4. 检查目标姿态碰撞
     this.robot.applyJointState(ARM_JOINT_NAMES, ARM_JOINT_NAMES.map(j => ikJoints[j]));
     const goalCollision = _checkArmEnvCollision(this.robot) || this.robot._checkGroundCollision?.();
     this.robot.applyJointState(ARM_JOINT_NAMES, ARM_JOINT_NAMES.map(j => cur[j]));
@@ -637,20 +649,11 @@ export class MCPToolExecutor {
       };
     }
 
-    // 3. 始终使用经由点轨迹 (抬起→水平→下降), 运动更自然可见
-    const safeZ = Math.max(tcpNow.z, target.z + 0.06, 0.14);
-
-    // Via1: 当前位置抬升到安全高度
+    // 5. Via1: 当前位置抬升到安全高度
     const r1 = this._multiStartIK(new THREE.Vector3(tcpNow.x, tcpNow.y, safeZ), cur);
     const via1Joints = r1.solved ? {} : null;
     if (via1Joints) ARM_JOINT_NAMES.forEach(j => via1Joints[j] = Math.atan2(
       Math.sin(r1.joints[j]), Math.cos(r1.joints[j])));
-
-    // Via2: 目标正上方安全高度
-    const r2 = this._multiStartIK(new THREE.Vector3(target.x, target.y, safeZ), via1Joints || cur);
-    const via2Joints = r2.solved ? {} : null;
-    if (via2Joints) ARM_JOINT_NAMES.forEach(j => via2Joints[j] = Math.atan2(
-      Math.sin(r2.joints[j]), Math.cos(r2.joints[j])));
 
     const segments = [];
     const xyDist = Math.hypot(target.x - tcpNow.x, target.y - tcpNow.y);
