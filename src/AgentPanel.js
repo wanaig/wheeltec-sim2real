@@ -30,6 +30,29 @@ const QUICK_CMDS = [
 function phaseFromLog(line) {
   if (!line) return null;
   if (line.startsWith('>>> 指令')) return { icon: '🗣️', text: '接收自然语言指令', detail: line.replace('>>> 指令:', '').trim() };
+  if (line.startsWith('[LLM] 启动')) return { icon: '🧠', text: '启动大模型决策', detail: 'LLM + MCP 工具调用模式' };
+  if (line.match(/^\[LLM\] 第\d+轮对话/)) return { icon: '🧠', text: '大模型思考中', detail: line.replace('[LLM]', '').trim() };
+  if (line.startsWith('[tool]')) {
+    const m = line.match(/^\[tool\]\s*(\w+)/);
+    const tool = m?.[1] || '';
+    const map = {
+      perceive: ['🔍', '感知环境 · 识别工具'],
+      get_scene_info: ['📦', '读取场景与料箱信息'],
+      get_robot_state: ['📡', '读取机器人状态'],
+      move_base: ['🚗', '移动底盘到作业站位'],
+      plan_arm_motion: ['🦾', '规划并执行机械臂运动'],
+      grasp: ['🤏', '闭合夹爪 · 夹取工具'],
+      release: ['📤', '张开夹爪 · 放置物品'],
+      retract: ['↩️', '收回机械臂到安全姿态'],
+      verify: ['✅', '验证任务结果'],
+    };
+    const [icon, text] = map[tool] || ['⚙️', '调用 MCP 工具'];
+    return { icon, text, detail: line.replace('[tool]', '').trim() };
+  }
+  if (line.startsWith('[MCP] 执行段')) return { icon: '🦾', text: '执行运动轨迹', detail: line.replace('[MCP]', '').trim() };
+  if (line.startsWith('[MCP] 调用工具')) return { icon: '⚙️', text: 'MCP 工具执行中', detail: line.replace('[MCP]', '').trim() };
+  if (line.match(/^\[MCP\]\s+\w+\s+→\s+ok/)) return { icon: '✅', text: '工具执行成功', detail: line.replace('[MCP]', '').trim() };
+  if (line.match(/^\[MCP\]\s+\w+\s+→\s+fail/)) return { icon: '⚠️', text: '工具执行失败 · 正在恢复', detail: line.replace('[MCP]', '').trim() };
   if (line.startsWith('[perceive]')) return { icon: '🔍', text: '感知环境 · 识别工具', detail: line.replace('[perceive]', '').trim() };
   if (line.startsWith('[nlu]')) return { icon: '🧠', text: '理解自然语言指令', detail: line.replace('[nlu]', '').trim() };
   if (line.startsWith('[plan]')) return { icon: '📋', text: '分解作业任务序列', detail: line.replace('[plan]', '').trim() };
