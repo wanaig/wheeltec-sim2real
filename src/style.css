@@ -1,0 +1,476 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%; height: 100%;
+  overflow: hidden;
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: #1a1a2e;
+  color: #e0e0e0;
+}
+
+#three-canvas {
+  position: fixed; top: 0; left: 0;
+  width: 100%; height: 100%;
+  display: block;
+}
+
+/* ─────────── 顶部标题栏 ─────────── */
+#topbar {
+  position: fixed; top: 0; left: 0; right: 0;
+  height: 48px;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 20px;
+  background: rgba(15, 15, 30, 0.85);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid rgba(80, 120, 200, 0.3);
+  z-index: 100;
+}
+
+.title {
+  font-size: 15px; font-weight: 600;
+  letter-spacing: 0.5px;
+  color: #aaccff;
+}
+.title .logo { color: #4488ff; margin-right: 6px; }
+
+.status {
+  font-size: 12px; font-weight: 600;
+  padding: 5px 14px; border-radius: 14px;
+  border: 1px solid;
+}
+.status.connected    { color: #66ff99; border-color: #339955; background: rgba(40,80,50,0.3); }
+.status.disconnected { color: #ff6666; border-color: #993333; background: rgba(80,40,40,0.3); }
+.status.connecting   { color: #ffaa33; border-color: #996633; background: rgba(80,60,30,0.3); }
+
+/* ─────────── 侧面板 ─────────── */
+.panel {
+  position: fixed; top: 56px; bottom: 12px;
+  width: 280px;
+  background: rgba(20, 22, 38, 0.92);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(80, 120, 200, 0.2);
+  border-radius: 10px;
+  padding: 12px;
+  overflow-y: auto;
+  z-index: 50;
+}
+#panel-left  { left: 12px; }
+#panel-right { right: 12px; }
+
+.panel::-webkit-scrollbar { width: 6px; }
+.panel::-webkit-scrollbar-thumb { background: rgba(80,120,200,0.4); border-radius: 3px; }
+
+.panel-section {
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(80, 120, 200, 0.12);
+}
+.panel-section:last-child { border-bottom: none; }
+
+.panel-section h3 {
+  font-size: 12px; font-weight: 600;
+  color: #88bbff;
+  margin-bottom: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+}
+
+/* ─────────── 表单行 ─────────── */
+.row {
+  display: flex; align-items: center;
+  margin-bottom: 8px; gap: 8px;
+}
+.row label {
+  font-size: 12px; color: #aab;
+  min-width: 80px; flex-shrink: 0;
+}
+.row input[type="text"],
+.row input[type="number"],
+.row select {
+  flex: 1;
+  background: rgba(30, 34, 50, 0.8);
+  border: 1px solid rgba(80, 120, 200, 0.25);
+  border-radius: 5px;
+  padding: 6px 8px;
+  color: #e0e0e0;
+  font-size: 12px;
+  font-family: 'Consolas', monospace;
+}
+.row input:focus { outline: none; border-color: #4488ff; }
+.row select { cursor: pointer; }
+.row select option { background: #1a1a2e; color: #e0e0e0; }
+
+.row.btns { gap: 6px; }
+.row.btns button {
+  flex: 1;
+  padding: 7px 0;
+  font-size: 12px; font-weight: 600;
+  border: 1px solid rgba(80, 120, 200, 0.35);
+  border-radius: 5px;
+  background: rgba(40, 60, 100, 0.5);
+  color: #cceeff;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.row.btns button:hover:not(:disabled) {
+  background: rgba(60, 100, 160, 0.7);
+  border-color: #4488ff;
+}
+.row.btns button:disabled {
+  opacity: 0.4; cursor: not-allowed;
+}
+
+.checkbox {
+  display: flex; align-items: center; gap: 6px;
+  cursor: pointer; min-width: auto !important;
+  font-size: 12px;
+}
+.checkbox input { width: 14px; height: 14px; accent-color: #4488ff; }
+
+/* ─────────── 预设按钮网格 ─────────── */
+.preset-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.preset-btn, .grip-btn {
+  padding: 8px 4px;
+  font-size: 12px; font-weight: 600;
+  border: 1px solid rgba(80, 120, 200, 0.3);
+  border-radius: 5px;
+  background: rgba(35, 50, 85, 0.6);
+  color: #bcd;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.preset-btn:hover, .grip-btn:hover {
+  background: rgba(50, 80, 130, 0.8);
+  border-color: #4488ff;
+  color: #fff;
+}
+
+/* ─────────── 关节滑块 ─────────── */
+.slider-row {
+  display: flex; align-items: center;
+  margin-bottom: 10px; gap: 8px;
+}
+.slider-label {
+  font-size: 11px; color: #99aabb;
+  min-width: 55px; flex-shrink: 0;
+  font-family: 'Consolas', monospace;
+}
+.slider {
+  flex: 1;
+  height: 4px;
+  -webkit-appearance: none; appearance: none;
+  background: rgba(60, 80, 120, 0.6);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: #4488ff;
+  cursor: pointer;
+  box-shadow: 0 0 6px rgba(68,136,255,0.6);
+}
+.slider::-moz-range-thumb {
+  width: 14px; height: 14px;
+  border: none; border-radius: 50%;
+  background: #4488ff;
+  cursor: pointer;
+}
+.slider:disabled { opacity: 0.4; cursor: not-allowed; }
+.slider:disabled::-webkit-slider-thumb { background: #556; box-shadow: none; }
+
+.slider-val {
+  font-size: 11px; color: #aaddff;
+  min-width: 38px; text-align: right;
+  font-family: 'Consolas', monospace;
+}
+
+/* ─────────── 小按钮 ─────────── */
+.mini-btn {
+  flex: 1;
+  padding: 6px 0;
+  font-size: 13px;
+  border: 1px solid rgba(80,120,200,0.3);
+  border-radius: 4px;
+  background: rgba(35,50,85,0.6);
+  color: #bcd;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.mini-btn:hover { background: rgba(50,80,130,0.8); color: #fff; }
+.mini-btn.hold-btn:active { background: rgba(68,136,255,0.6); color: #fff; box-shadow: 0 0 8px rgba(68,136,255,0.5); }
+
+/* ─────────── 信息框 ─────────── */
+.info-box {
+  font-size: 11px; line-height: 1.6;
+  color: #aabbcc;
+  background: rgba(15, 18, 30, 0.6);
+  border: 1px solid rgba(80,120,200,0.15);
+  border-radius: 5px;
+  padding: 8px 10px;
+  font-family: 'Consolas', monospace;
+  word-break: break-all;
+}
+.info-box .ok   { color: #66ff99; font-weight: 600; }
+.info-box .warn { color: #ffaa33; font-weight: 600; }
+
+#ee-info b { color: #88bbff; }
+
+/* ─────────── 键盘帮助 ─────────── */
+.kbd-grid { display: flex; flex-direction: column; gap: 5px; }
+.kbd-row { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #99aabb; }
+.kbd-group { display: inline-flex; gap: 3px; min-width: 56px; }
+kbd {
+  display: inline-block;
+  min-width: 20px; padding: 2px 5px;
+  font-size: 10px; font-family: 'Consolas', monospace; font-weight: 700;
+  text-align: center;
+  color: #aaddff;
+  background: rgba(40, 55, 90, 0.8);
+  border: 1px solid rgba(80, 120, 200, 0.4);
+  border-radius: 4px;
+  box-shadow: 0 1px 0 rgba(0,0,0,0.3);
+}
+.kbd-sep {
+  font-size: 10px; color: #667788;
+  text-transform: uppercase; letter-spacing: 0.8px;
+  margin-top: 4px; padding-top: 4px;
+  border-top: 1px solid rgba(80,120,200,0.12);
+}
+
+/* ─────────── 碰撞警告 ─────────── */
+.collision-warn {
+  position: fixed;
+  top: 56px; left: 50%;
+  transform: translateX(-50%) translateY(-20px);
+  padding: 8px 20px;
+  font-size: 13px; font-weight: 600;
+  color: #ffaa33;
+  background: rgba(80, 40, 10, 0.9);
+  border: 1px solid rgba(200, 120, 30, 0.6);
+  border-radius: 8px;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 200;
+  transition: opacity 0.2s, transform 0.2s;
+}
+.collision-warn.active {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ─────────── 相机实时画面 ─────────── */
+#camera-panel {
+  position: fixed;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  width: min(720px, calc(100vw - 600px));
+  min-width: 420px;
+  background: rgba(20, 22, 38, 0.92);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(80, 120, 200, 0.25);
+  border-radius: 10px;
+  padding: 8px 10px;
+  z-index: 50;
+  transition: height 0.2s;
+}
+#camera-panel.collapsed { height: 34px; overflow: hidden; }
+.camera-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 6px;
+}
+.camera-title {
+  font-size: 12px; font-weight: 600; color: #88bbff;
+  text-transform: uppercase; letter-spacing: 0.8px;
+}
+.camera-head .mini-btn { flex: 0 0 auto; padding: 3px 10px; }
+#camera-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.camera-slot {
+  background: rgba(15, 18, 30, 0.6);
+  border: 1px solid rgba(80, 120, 200, 0.15);
+  border-radius: 6px;
+  padding: 6px;
+}
+.camera-bar {
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: 5px;
+}
+.camera-bar .camera-label {
+  font-size: 11px; color: #99aabb; flex-shrink: 0;
+  font-family: 'Consolas', monospace;
+}
+.camera-bar .cam-topic {
+  flex: 1; min-width: 0;
+  background: rgba(30, 34, 50, 0.8);
+  border: 1px solid rgba(80, 120, 200, 0.25);
+  border-radius: 4px;
+  padding: 3px 6px; color: #e0e0e0;
+  font-size: 11px; font-family: 'Consolas', monospace;
+}
+.camera-bar .cam-topic:focus { outline: none; border-color: #4488ff; }
+.camera-bar .cam-kind {
+  flex-shrink: 0;
+  background: rgba(30, 34, 50, 0.8);
+  border: 1px solid rgba(80, 120, 200, 0.25);
+  border-radius: 4px;
+  padding: 3px 4px; color: #e0e0e0;
+  font-size: 10px; cursor: pointer;
+}
+.camera-bar .cam-kind option { background: #1a1a2e; }
+.camera-bar .cam-en { flex-shrink: 0; min-width: auto !important; }
+.camera-bar .cam-en input { width: 13px; height: 13px; accent-color: #4488ff; }
+.cam-canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background: #11121c;
+  border-radius: 4px;
+  object-fit: cover;
+}
+.cam-status {
+  font-size: 10px; color: #667788;
+  font-family: 'Consolas', monospace;
+  margin-top: 4px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ─────────── 交互型智能体状态面板 (AgentPanel) ─────────── */
+
+/* 顶部大字幕横幅 — 演示视频字幕 */
+#agent-banner {
+  position: fixed;
+  top: 58px; left: 50%;
+  transform: translateX(-50%) translateY(-30px);
+  display: flex; align-items: center; gap: 12px;
+  max-width: min(720px, calc(100vw - 600px));
+  padding: 12px 22px;
+  background: rgba(15, 18, 30, 0.92);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(80, 120, 200, 0.35);
+  border-radius: 12px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 150;
+  transition: opacity 0.25s, transform 0.25s;
+}
+#agent-banner.active {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+#agent-banner .ab-icon { font-size: 26px; line-height: 1; }
+#agent-banner .ab-text {
+  font-size: 18px; font-weight: 700;
+  color: #e8f0ff; letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+#agent-banner .ab-detail {
+  font-size: 13px; color: #88bbff;
+  font-family: 'Consolas', monospace;
+  max-width: 420px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#agent-banner.warn    { border-color: rgba(255,170,51,0.7); box-shadow: 0 6px 24px rgba(120,80,0,0.5); }
+#agent-banner.warn .ab-text { color: #ffcc66; }
+#agent-banner.success { border-color: rgba(102,255,153,0.7); box-shadow: 0 6px 24px rgba(40,120,60,0.5); }
+#agent-banner.success .ab-text { color: #aaffcc; }
+#agent-banner.fail    { border-color: rgba(255,102,102,0.7); box-shadow: 0 6px 24px rgba(120,40,40,0.5); }
+#agent-banner.fail .ab-text { color: #ffaaaa; }
+
+/* 控制台面板 */
+#agent-console {
+  position: fixed;
+  right: 12px;
+  top: 56px;
+  width: 280px;
+  max-height: calc(50vh - 60px);
+  background: rgba(20, 22, 38, 0.94);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(80, 120, 200, 0.25);
+  border-radius: 10px;
+  z-index: 60;
+  display: flex; flex-direction: column;
+  transition: max-height 0.2s;
+  margin-top: 4px;
+}
+/* 与右侧关节面板错开: 关节面板右移避开 — 实际右面板 full-height, 故本面板置左下角更佳 */
+#agent-console { right: auto; left: 300px; top: auto; bottom: 12px; max-height: 40vh; }
+#agent-console.collapsed { max-height: 36px; overflow: hidden; }
+.ac-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(80,120,200,0.15);
+}
+.ac-title { font-size: 12px; font-weight: 600; color: #88bbff; flex: 1; text-transform: uppercase; letter-spacing: 0.6px; }
+.ac-status { font-size: 10px; padding: 2px 8px; border-radius: 10px; border: 1px solid rgba(80,120,200,0.3); color: #99aabb; }
+.ac-status.ok { color: #66ff99; border-color: #339955; background: rgba(40,80,50,0.3); }
+.ac-head .mini-btn { flex: 0 0 auto; padding: 3px 10px; }
+.ac-body { padding: 8px 10px; overflow-y: auto; }
+.ac-body::-webkit-scrollbar { width: 5px; }
+.ac-body::-webkit-scrollbar-thumb { background: rgba(80,120,200,0.4); border-radius: 3px; }
+.ac-section { margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid rgba(80,120,200,0.1); }
+.ac-section:last-child { border-bottom: none; margin-bottom: 0; }
+.ac-subtitle { font-size: 10px; color: #667788; text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 5px; }
+.ac-row { display: flex; gap: 6px; margin-bottom: 6px; }
+.ac-row input {
+  flex: 1; min-width: 0;
+  background: rgba(30, 34, 50, 0.8);
+  border: 1px solid rgba(80,120,200,0.25);
+  border-radius: 5px; padding: 6px 8px;
+  color: #e0e0e0; font-size: 11px;
+  font-family: 'Consolas', monospace;
+}
+.ac-row input:focus { outline: none; border-color: #4488ff; }
+.ac-row button {
+  flex: 0 0 auto; padding: 6px 12px;
+  font-size: 11px; font-weight: 600;
+  border: 1px solid rgba(80,120,200,0.4);
+  border-radius: 5px;
+  background: rgba(40,80,160,0.6);
+  color: #cceeff; cursor: pointer;
+  transition: all 0.15s;
+}
+.ac-row button:hover { background: rgba(60,110,200,0.8); border-color: #4488ff; }
+.ac-quick { display: flex; flex-direction: column; gap: 4px; }
+.ac-quick-btn {
+  text-align: left;
+  padding: 5px 8px;
+  font-size: 11px;
+  border: 1px solid rgba(80,120,200,0.22);
+  border-radius: 4px;
+  background: rgba(35,50,85,0.5);
+  color: #bcc; cursor: pointer;
+  transition: all 0.12s;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ac-quick-btn:hover { background: rgba(50,80,130,0.8); border-color: #4488ff; color: #fff; }
+.ac-objects { display: flex; flex-wrap: wrap; gap: 4px; font-size: 10px; color: #aabbcc; font-family: 'Consolas', monospace; }
+.ac-obj { background: rgba(40,60,100,0.5); border: 1px solid rgba(80,120,200,0.2); border-radius: 3px; padding: 2px 6px; }
+.ac-obj b { color: #88bbff; }
+.ac-log {
+  font-size: 10px; line-height: 1.5;
+  font-family: 'Consolas', monospace;
+  max-height: 140px; overflow-y: auto;
+  background: rgba(15,18,30,0.6);
+  border: 1px solid rgba(80,120,200,0.12);
+  border-radius: 5px; padding: 6px;
+}
+.ac-log::-webkit-scrollbar { width: 4px; }
+.ac-log::-webkit-scrollbar-thumb { background: rgba(80,120,200,0.4); border-radius: 2px; }
+.ac-log-line { color: #99aabb; padding: 1px 0; word-break: break-all; }
+.ac-log-line.ok    { color: #66ff99; }
+.ac-log-line.warn  { color: #ffaa55; }
+.ac-log-line.exec  { color: #aaddff; }
+.ac-log-line.sense { color: #bb99ff; }
+.ac-log-line.plan  { color: #99ffcc; }

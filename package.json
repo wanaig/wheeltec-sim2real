@@ -1,0 +1,18 @@
+{
+  "name": "wheeltec-sim2real",
+  "version": "1.0.0",
+  "description": "WHEELTEC mini_4wd_six_arm digital twin - Vite + Three.js sim2real visualization with ROS bridge",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "roslib": "^1.4.1",
+    "three": "^0.160.0"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0"
+  }
+}

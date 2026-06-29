@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>wheeltec_sim2real_bridge</name>
+  <version>1.0.0</version>
+  <description>
+    WHEELTEC mini_4wd_six_arm sim2real 桥接节点 (ROS2).
+
+    串口桥接: 订阅 voice_joint_states / cmd_vel → 打包成下位机帧 → STM32;
+              串口读取 → 发布 odom / imu / PowerVoltage.
+    仿真孪生前端 (Vite + Three.js + roslibjs) 经 rosbridge_server 与本节点双向通信.
+
+    由 ROS1 wheeltec_arm_pick/turn_on_robot (wheeltec_arm_six.cpp) 移植而来,
+    串口协议 (帧头 0x7B/0xAA, XOR 校验, 速度/角度 ×1000 定点) 100% 保持一致。
+  </description>
+  <maintainer email="wheeltec@todo.todo">wheeltec</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

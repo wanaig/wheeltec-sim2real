@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.DS_Store
+Thumbs.db
+*.log
+__pycache__/
+*.pyc
+ros2/build/
+ros2/install/
+ros2/log/

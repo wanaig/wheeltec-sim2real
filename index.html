@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WHEELTEC mini_4wd_six_arm · Sim2Real 数字孪生</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <div id="app">
+    <canvas id="three-canvas"></canvas>
+
+    <!-- 顶部标题栏 -->
+    <div id="topbar">
+      <div class="title">
+        <span class="logo">⚙</span> WHEELTEC mini_4wd_six_arm · Sim2Real
+      </div>
+      <div id="ros-status" class="status disconnected">ROS 未连接</div>
+    </div>
+
+    <!-- 左侧控制面板 -->
+    <div id="panel-left" class="panel">
+      <div class="panel-section">
+        <h3>ROS 连接 (Sim2Real)</h3>
+        <div class="row">
+          <label>ROS 版本</label>
+          <select id="ros-version">
+            <option value="ros2" selected>ROS2 (Foxy/Humble/Jazzy)</option>
+            <option value="ros1">ROS1 (Melodic/Noetic)</option>
+          </select>
+        </div>
+        <div class="row">
+          <label>WebSocket URL</label>
+          <input id="ros-url" type="text" value="ws://192.168.0.20:9090" />
+        </div>
+        <div class="row btns">
+          <button id="btn-connect">连接</button>
+          <button id="btn-disconnect" disabled>断开</button>
+        </div>
+        <div class="row">
+          <label class="checkbox">
+            <input id="cb-sync" type="checkbox" /> 实时同步真机状态
+          </label>
+        </div>
+        <div class="row">
+          <label class="checkbox">
+            <input id="cb-publish" type="checkbox" /> 将仿真指令发送至真机
+          </label>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <h3>预设位姿</h3>
+        <div class="preset-grid">
+          <button class="preset-btn" data-preset="arm_home">归零</button>
+          <button class="preset-btn" data-preset="arm_clamp">夹取</button>
+          <button class="preset-btn" data-preset="arm_rotate_put">侧放</button>
+        </div>
+        <div class="row btns" style="margin-top:8px">
+          <button class="grip-btn" data-grip="open">夹爪张开</button>
+          <button class="grip-btn" data-grip="close">夹爪闭合</button>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <h3>逆运动学 (IK)</h3>
+        <div class="row">
+          <label>X (m)</label>
+          <input id="ik-x" type="number" step="0.01" value="0.15" />
+        </div>
+        <div class="row">
+          <label>Y (m)</label>
+          <input id="ik-y" type="number" step="0.01" value="0.00" />
+        </div>
+        <div class="row">
+          <label>Z (m)</label>
+          <input id="ik-z" type="number" step="0.01" value="0.35" />
+        </div>
+        <div class="row btns">
+          <button id="btn-ik-solve">求解 IK</button>
+          <button id="btn-ik-marker">显示目标点</button>
+          <button id="btn-random-target">随机生成目标</button>
+        </div>
+        <div id="ik-info" class="info-box"></div>
+      </div>
+    </div>
+
+    <!-- 右侧关节控制面板 -->
+    <div id="panel-right" class="panel">
+      <div class="panel-section">
+        <h3>机械臂关节 (rad)</h3>
+        <div id="arm-sliders"></div>
+      </div>
+      <div class="panel-section">
+        <h3>底盘</h3>
+        <div id="extra-sliders"></div>
+      </div>
+      <div class="panel-section">
+        <h3>末端位姿</h3>
+        <div id="ee-info" class="info-box">计算中...</div>
+      </div>
+    </div>
+
+    <!-- 底部相机实时画面面板 -->
+    <div id="camera-panel">
+      <div class="camera-head">
+        <span class="camera-title">实时相机画面</span>
+        <button id="camera-collapse" class="mini-btn">折叠</button>
+      </div>
+      <div id="camera-grid">
+        <div class="camera-slot">
+          <div class="camera-bar">
+            <span class="camera-label">相机1</span>
+            <input class="cam-topic" type="text" value="/image_raw/compressed" data-cam="0" />
+            <select class="cam-kind" data-cam="0">
+              <option value="compressed" selected>CompressedImage</option>
+              <option value="raw">Image (raw)</option>
+            </select>
+            <label class="checkbox cam-en"><input type="checkbox" data-cam="0" /> 启用</label>
+          </div>
+          <canvas class="cam-canvas" data-cam="0" width="320" height="240"></canvas>
+          <div class="cam-status" data-cam="0">未启用</div>
+        </div>
+        <div class="camera-slot">
+          <div class="camera-bar">
+            <span class="camera-label">相机2</span>
+            <input class="cam-topic" type="text" value="/usb_cam/image_raw/compressed" data-cam="1" />
+            <select class="cam-kind" data-cam="1">
+              <option value="compressed" selected>CompressedImage</option>
+              <option value="raw">Image (raw)</option>
+            </select>
+            <label class="checkbox cam-en"><input type="checkbox" data-cam="1" /> 启用</label>
+          </div>
+          <canvas class="cam-canvas" data-cam="1" width="320" height="240"></canvas>
+          <div class="cam-status" data-cam="1">未启用</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
