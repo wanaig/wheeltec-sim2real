@@ -14,7 +14,7 @@
  *   // 渲染循环里: mockAgent.update();
  */
 import * as THREE from 'three';
-import { PRESETS, GRIPPER_POSES, ARM_JOINT_NAMES, WHEEL_JOINT_NAMES } from './RobotModel.js';
+import { PRESETS, GRIPPER_POSES, ARM_JOINT_NAMES, GRIPPER_JOINT_NAMES, WHEEL_JOINT_NAMES } from './RobotModel.js';
 import {
   createToolMesh, TOOL_CN, generateLayout,
   LAYOUTS, LAYOUT_NAMES, LAYOUT_CN,
@@ -106,6 +106,8 @@ export class MockAgent {
 
     this._target = null;
     this._slotXyz = null;
+    this._lastAboveJoints = null;   // 最近一次竖直下降起点(目标正上方)关节角, 供 retract 逆序抬升
+    this._lastAboveGripper = null;  // 下降段夹爪状态 (retract 逆序需用同状态, 否则张开/闭合连杆位姿不同可能碰撞)
     this._buildScene3D();
     this._buildTools();
 
@@ -473,6 +475,67 @@ export class MockAgent {
     return null;
   }
 
+  /** 在关节插值轨迹上采样检查碰撞 (fromJoints → toJoints), 不依赖当前关节状态 */
+  _checkTrajCollision(fromJoints, toJoints, samples = 20) {
+    const names = ARM_JOINT_NAMES;
+    const saved = names.map(n => this.robot.getJoint(n));
+    const from = names.map(n => fromJoints[n] ?? 0);
+    const to = names.map(n => toJoints[n] ?? 0);
+    let hit = null;
+    for (let i = 0; i <= samples; i++) {
+      const t = i / samples;
+      const vals = names.map((n, idx) => from[idx] + (to[idx] - from[idx]) * t);
+      this.robot.applyJointState(names, vals);
+      const c = this._checkArmEnvCollision();
+      if (c) { hit = c; break; }
+    }
+    this.robot.applyJointState(names, saved);
+    return hit;
+  }
+
+  /** 关节角是否全部在 URDF 限位内 */
+  _jointsWithinLimits(joints) {
+    for (const n of ARM_JOINT_NAMES) {
+      const lim = this.robot.jointLimits?.[n];
+      if (!lim) continue;
+      const v = joints[n] ?? 0;
+      if (v < lim[0] - 1e-6 || v > lim[1] + 1e-6) return false;
+    }
+    return true;
+  }
+
+  /** 返回所有 IK 解 (不同分支), 供 retract 逐个尝试碰撞检测 */
+  _multiIKSolutions(target) {
+    const cur = {};
+    ARM_JOINT_NAMES.forEach(j => cur[j] = this.robot.getJoint(j));
+    const armBase = new THREE.Vector3();
+    this.robot.jointGroups['joint1'].getWorldPosition(armBase);
+    const targetYaw = Math.atan2(target.y - armBase.y, target.x - armBase.x);
+    const startPoints = [
+      { joints: cur },
+      { joints: { joint1: targetYaw, joint2: 0.14, joint3: 1.57, joint4: 1.57, joint5: 0 } },
+      { joints: { joint1: targetYaw, joint2: 0.54, joint3: 1.57, joint4: 1.57, joint5: 0 } },
+      { joints: { joint1: targetYaw, joint2: -0.8,  joint3: 1.2,  joint4: 1.0,  joint5: 0 } },
+      { joints: { joint1: targetYaw, joint2: 0,    joint3: 0,    joint4: 0,    joint5: 0 } },
+      { joints: PRESETS.arm_uplift },
+      { joints: PRESETS.arm_home },
+    ];
+    const solutions = [];
+    for (const sp of startPoints) {
+      this.robot.applyJointState(ARM_JOINT_NAMES,
+        ARM_JOINT_NAMES.map(j => sp.joints[j] ?? 0));
+      const result = this.ik.solve(target);
+      if (result.solved) {
+        const joints = {};
+        ARM_JOINT_NAMES.forEach(j => joints[j] = this.robot.getJoint(j));
+        solutions.push({ error: result.error, joints });
+      }
+    }
+    this.robot.applyJointState(ARM_JOINT_NAMES,
+      ARM_JOINT_NAMES.map(j => cur[j]));
+    return solutions;
+  }
+
   _isInMobileArea(x, y) {
     const a = MockAgent.MOBILE_AREA;
     const r = MockAgent.CHASSIS_RADIUS;
@@ -703,7 +766,7 @@ export class MockAgent {
         { n: 'open_gripper', p: { d: 0.4 } },
         { n: 'retract', p: { lift: 0.10, d: 0.7 } },
         { n: 'verify_place', p: {} },
-        { n: 'go_preset', p: { name: 'arm_home', d: 1.0 } },
+        { n: 'go_preset', p: { name: 'arm_uplift', d: 1.0 } },  // 收回至安全抬起姿态 (避免折叠归位时连杆扫过料箱壁)
       );
       return plan;
     }
@@ -913,6 +976,17 @@ export class MockAgent {
     const safeZ = Math.max(tcpNow.z, target.z + 0.05, 0.12); // 安全高度至少12cm
     const needLift = tcpNow.z < safeZ - 0.02;
 
+    // 记录"目标正上方"关节角: 当本次为竖直下降 (已在安全高度, xy接近, z降低) 时,
+    // 当前位姿即下降起点(目标正上方), 供后续 retract 逆序抬升 (逆序 = 下降的精确逆, 必然无碰撞)
+    // 同时记录夹爪状态: 放置后 retract 用张开, 抓取后 retract 用闭合 — 逆序必须用下降段同状态
+    if (!needLift && target.z < tcpNow.z - 0.02 &&
+        Math.hypot(target.x - tcpNow.x, target.y - tcpNow.y) < 0.03) {
+      this._lastAboveJoints = { ...cur };
+      const g = {};
+      GRIPPER_JOINT_NAMES.forEach(j => g[j] = this.robot.getJoint(j));
+      this._lastAboveGripper = g;
+    }
+
     if (needLift && p.d > 0.8) {
       // 先抬到安全高度 (用 IK 求解上方点)
       const liftTarget = new THREE.Vector3(tcpNow.x, tcpNow.y, safeZ);
@@ -987,6 +1061,144 @@ export class MockAgent {
     return { ok: placed, reason: placed ? 'object_in_slot' : 'object_not_in_slot' };
   }
 
+  // ── retract (收回机械臂: 垂直抬升 + 安全收臂, 从上往下抓取/放置的逆操作) ──
+  // 多策略抬升, 避免料箱壁/工作台穿模 (与 MCPTools._retract 一致):
+  //   1a) 逆序抬升: 复用 _moveToPose 下降段记录的"目标正上方"关节角 (下降已过碰撞检测 ⇒ 逆序必然无碰撞)
+  //   1b) 多解 IK 垂直抬升: 尝试所有分支解, 选首个无碰撞的
+  //   1c) 后退脱离 + 抬升: 臂伸出在障碍上方时, 先向臂基座方向后退再抬起
+  //   2)  过渡到安全收臂姿态 (保持 joint1 方向, 非致命: 碰撞则跳过, 臂已在安全高度)
+  async _retract(p = {}) {
+    const cur = {};
+    ARM_JOINT_NAMES.forEach(j => cur[j] = this.robot.getJoint(j));
+    const tcpNow = this.robot.getGripperTCP();
+    // 安全收回高度: 高于工作台(0.060)与料箱壁(0.113), 确保抬起后连杆不穿模
+    const SAFE_RETRACT_Z = 0.16;
+
+    // 保存夹爪状态; 未持物时(放置后) 逆序抬升前临时复刻下降段夹爪状态:
+    // 下降用闭合夹爪通过碰撞检测, 放置后夹爪已张开 → 张开态下 link7 等连杆位姿不同可能穿料箱壁,
+    // 须先回到下降段夹爪状态再逆序, 使逆序 = 下降的精确逆 (必然无碰撞)
+    const savedGrip = {};
+    GRIPPER_JOINT_NAMES.forEach(j => savedGrip[j] = this.robot.getJoint(j));
+    const holdingObject = (this.tools ?? []).some(t => t.grasped);
+    let gripAdjusted = false;
+    const restoreGrip = async () => {
+      if (!gripAdjusted) return;
+      await new Promise(resolve => {
+        this.robot.tweenTo(savedGrip, 0.4, () => resolve());
+      });
+    };
+
+    const segments = [];
+    let segStart = cur;
+
+    // ── 阶段1a: 逆序抬升 (复用下降段"目标正上方"关节角 + 下降段夹爪状态) ──
+    if (this._lastAboveJoints) {
+      const above = this._lastAboveJoints;
+      // 未持物时(放置后), 临时切换到下降段夹爪状态, 使逆序 = 下降的精确逆 (必然无碰撞)
+      if (!holdingObject && this._lastAboveGripper) {
+        await new Promise(resolve => {
+          this.robot.tweenTo(this._lastAboveGripper, 0.4, () => resolve());
+        });
+        gripAdjusted = true;
+      }
+      const c = this._checkTrajCollision(cur, above, 20);
+      if (!c) {
+        segments.push({ joints: above, duration: 0.9, desc: '垂直抬升到安全高度' });
+        segStart = above;
+      } else {
+        this._log(`[arm] 逆序抬升碰撞, 改用多策略抬升: ${c}`);
+      }
+      this._lastAboveJoints = null;   // 一次性消费
+      this._lastAboveGripper = null;
+    }
+
+    // ── 阶段1b: 多解 IK 垂直抬升 (尝试所有分支解, 选首个无碰撞的) ──
+    if (segments.length === 0 && tcpNow.z < SAFE_RETRACT_Z - 0.01) {
+      const liftZ = Math.max(tcpNow.z + (p.lift ?? 0.08), SAFE_RETRACT_Z);
+      const sols = this._multiIKSolutions(new THREE.Vector3(tcpNow.x, tcpNow.y, liftZ));
+      for (const sol of sols) {
+        const liftJoints = {};
+        ARM_JOINT_NAMES.forEach(j => liftJoints[j] = Math.atan2(
+          Math.sin(sol.joints[j]), Math.cos(sol.joints[j])));
+        if (!this._jointsWithinLimits(liftJoints)) continue;
+        const c = this._checkTrajCollision(cur, liftJoints, 20);
+        if (!c) {
+          segments.push({ joints: liftJoints, duration: 0.9, desc: '垂直抬升到安全高度' });
+          segStart = liftJoints;
+          break;
+        }
+      }
+    }
+
+    // ── 阶段1c: 后退脱离 + 抬升 (臂伸出在障碍上方时, 先向臂基座方向后退再抬起) ──
+    if (segments.length === 0) {
+      const armBase = new THREE.Vector3();
+      this.robot.jointGroups['joint1'].getWorldPosition(armBase);
+      const dx = armBase.x - tcpNow.x;
+      const dy = armBase.y - tcpNow.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 0.02) {
+        const step = Math.min(0.06, dist * 0.3);
+        const rx = tcpNow.x + (dx / dist) * step;
+        const ry = tcpNow.y + (dy / dist) * step;
+        const rs = this._multiIKSolutions(new THREE.Vector3(rx, ry, tcpNow.z));
+        for (const sol of rs) {
+          const rj = {};
+          ARM_JOINT_NAMES.forEach(j => rj[j] = Math.atan2(
+            Math.sin(sol.joints[j]), Math.cos(sol.joints[j])));
+          if (!this._jointsWithinLimits(rj)) continue;
+          const c = this._checkTrajCollision(cur, rj, 16);
+          if (!c) {
+            segments.push({ joints: rj, duration: 0.6, desc: '后退脱离障碍' });
+            const liftZ = Math.max(tcpNow.z + 0.08, SAFE_RETRACT_Z);
+            const ls = this._multiIKSolutions(new THREE.Vector3(rx, ry, liftZ));
+            for (const sol2 of ls) {
+              const lj = {};
+              ARM_JOINT_NAMES.forEach(j => lj[j] = Math.atan2(
+                Math.sin(sol2.joints[j]), Math.cos(sol2.joints[j])));
+              if (!this._jointsWithinLimits(lj)) continue;
+              const c2 = this._checkTrajCollision(rj, lj, 20);
+              if (!c2) {
+                segments.push({ joints: lj, duration: 0.8, desc: '垂直抬升到安全高度' });
+                segStart = lj;
+                break;
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
+
+    // ── 阶段2: 过渡到安全收臂姿态 (非致命: 碰撞则跳过, 臂已在安全高度) ──
+    const retractPose = {
+      joint1: cur['joint1'],
+      joint2: PRESETS.arm_uplift.joint2,
+      joint3: PRESETS.arm_uplift.joint3,
+      joint4: PRESETS.arm_uplift.joint4,
+      joint5: 0,
+    };
+    const c2 = this._checkTrajCollision(segStart, retractPose, 20);
+    if (!c2) {
+      segments.push({ joints: retractPose, duration: 0.9, desc: '收回至安全姿态' });
+    }
+
+    if (segments.length === 0) {
+      await restoreGrip();
+      return { ok: false, reason: 'trajectory_collision', detail: '收回轨迹碰撞 (所有抬升策略均失败)' };
+    }
+
+    this._log(`[arm] 收回机械臂到安全姿态 (保持方向 joint1=${cur['joint1'].toFixed(2)})`);
+    for (const seg of segments) {
+      this._log(`[arm] 执行段: ${seg.desc} (${seg.duration}s)`);
+      await new Promise(resolve => {
+        this.robot.tweenTo(seg.joints, seg.duration, () => resolve());
+      });
+    }
+    await restoreGrip();  // 在安全高度恢复夹爪状态
+    return { ok: true };
+  }
+
   async _executeSkill(skill) {
     switch (skill.n) {
       case 'go_preset':
@@ -1005,8 +1217,7 @@ export class MockAgent {
         this._graspNearest();
         return { ok: true };
       case 'retract': {
-        const tcp = this.robot.getGripperTCP();
-        return this._moveToPose({ x: tcp.x, y: tcp.y, z: tcp.z + skill.p.lift, d: skill.p.d });
+        return this._retract(skill.p);
       }
       case 'verify_grasp':
         await this._delay(200);
@@ -1110,11 +1321,14 @@ export class MockAgent {
         const r = await this._executeSkill(skill);
         this._log(`[exec ${i}] ${skill.n} → ok=${r.ok}`);
         if (!r.ok) {
-          if (skill.n === 'verify_grasp' || skill.n === 'verify_place' || skill.n === 'move_to_pose') {
+          if (skill.n === 'verify_grasp' || skill.n === 'verify_place' ||
+              skill.n === 'move_to_pose' || skill.n === 'retract') {
             failed = true;
             failSkill = skill.n;
             break;
           }
+          // go_preset 失败: 臂未到预设位, 但任务核心步骤已完成, 记录但不中断
+          this._log(`[exec] ${skill.n} 失败, 已跳过 (${r.detail || r.reason || ''})`);
         }
       }
       if (!failed) {
