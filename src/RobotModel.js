@@ -69,7 +69,7 @@ export const PRESETS = {
 
 export const GRIPPER_POSES = {
   open:  { joint6:  0.45, joint7: -0.45, joint8:  0.45, joint9:  0.45, joint10:  0.45, joint11:  0.45 },
-  close: { joint6: -0.45, joint7:  0.45, joint8: -0.45, joint9: -0.45, joint10: -0.45, joint11: -0.45 },
+  close: { joint6: -0.68, joint7:  0.68, joint8: -0.68, joint9: -0.68, joint10: -0.68, joint11: -0.68 },
 };
 
 // 用于 ROS /joint_states 话题的关节顺序 (与 controller_joint_names 一致)

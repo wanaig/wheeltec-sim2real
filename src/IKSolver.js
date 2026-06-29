@@ -16,8 +16,8 @@ export class IKSolver {
     this.chain = ARM_JOINT_NAMES;              // ['joint1'...'joint5'] (用于结果输出)
     this.posChain = ARM_JOINT_NAMES.slice(0, 4); // 位置求解链 joint1-4
     this.eeJoint = 'joint5';                   // 末端关节 (link5 frame)
-    this.maxIter = 200;             // 最大迭代次数
-    this.tolerance = 0.025;         // 收敛阈值 25mm
+    this.maxIter = 350;             // 最大迭代次数
+    this.tolerance = 0.008;         // 收敛阈值 8mm, 避免夹爪未贴近目标就判定可抓取
     // 夹爪 TCP (抓取中心) 相对 link5 的固定偏移 — IK 目标为夹爪指尖, 非 link5 原点
     this._tcp = new THREE.Vector3(GRIPPER_TCP[0], GRIPPER_TCP[1], GRIPPER_TCP[2]);
     this._eeQ = new THREE.Quaternion();

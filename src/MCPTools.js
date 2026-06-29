@@ -231,7 +231,7 @@ export const MCP_TOOLS = [
     type: 'function',
     function: {
       name: 'grasp',
-      description: '闭合夹爪, 抓取距离TCP最近的工具(12cm内)。返回是否抓取成功。',
+      description: '闭合夹爪, 抓取距离TCP最近且已贴近的工具(3.5cm内)。返回是否抓取成功。',
       parameters: { type: 'object', properties: {}, required: [] },
     },
   },

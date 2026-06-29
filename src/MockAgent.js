@@ -22,6 +22,7 @@ import {
 
 // ─────────────── 默认布局 (混杂摆放, 供初始场景使用) ───────────────
 const DEFAULT_LAYOUT = 'cluttered';
+const GRASP_ATTACH_DISTANCE = 0.035;
 
 // 料箱3格×12cm, 在左工作台上 (Y center=-0.30)
 // 旋转180°: slot1靠近过道(机械臂侧), slot3远离
@@ -1013,7 +1014,7 @@ export class MockAgent {
         t.currentXyz[0] - tcp.x, t.currentXyz[1] - tcp.y, t.currentXyz[2] - tcp.z);
       if (d < bestD) { bestD = d; best = t; }
     }
-    if (best && bestD < 0.12) {
+    if (best && bestD < GRASP_ATTACH_DISTANCE) {
       best.grasped = true;
       return true;
     }
