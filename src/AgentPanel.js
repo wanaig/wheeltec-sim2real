@@ -97,6 +97,7 @@ export class AgentPanel {
           <div class="ac-row">
             <input type="text" id="ac-instr" placeholder="输入自然语言指令, 如 把左侧的扳手放到料箱第三格" />
             <button id="ac-send">发送</button>
+            <button id="ac-stop" disabled style="background:#422;color:#F88;border:1px solid #644">停止</button>
           </div>
           <div class="ac-quick" id="ac-quick"></div>
         </div>
@@ -294,12 +295,31 @@ export class AgentPanel {
 
     // 事件
     this.console.querySelector('#ac-send').addEventListener('click', () => this._onSend());
+    this.console.querySelector('#ac-stop').addEventListener('click', () => this._onStop());
     this.console.querySelector('#ac-instr').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') this._onSend();
     });
     this.console.querySelector('#ac-collapse').addEventListener('click', () => {
       this.console.classList.toggle('collapsed');
     });
+  }
+
+  /** 停止运行中的 LLM 对话 */
+  _onStop() {
+    if (this._llmAgent) this._llmAgent.stop();
+    this._busy = false;
+    this._pushLog('[local] 用户已停止对话');
+    this._setBanner('⏹️', '对话已停止', '用户手动终止');
+    this.banner.classList.remove('warn');
+    this._updateRunButtons(false);
+  }
+
+  /** 同步发送/停止按钮可用状态 */
+  _updateRunButtons(running) {
+    const send = this.console.querySelector('#ac-send');
+    const stop = this.console.querySelector('#ac-stop');
+    if (send) send.disabled = running;
+    if (stop) stop.disabled = !running;
   }
 
   _onSend() {
@@ -414,6 +434,7 @@ export class AgentPanel {
       this._setBanner('🗣️', '接收自然语言指令', text);
       this._busy = true;
       this.banner.classList.add('active');
+      this._updateRunButtons(true);
       this._mockAgent.run(text);
       return;
     }
@@ -426,6 +447,7 @@ export class AgentPanel {
     this._setBanner('🗣️', '接收自然语言指令', text);
     this._busy = true;
     this.banner.classList.add('active');
+    this._updateRunButtons(true);
   }
 
   // ─────────────── 消息处理 ───────────────
@@ -442,7 +464,10 @@ export class AgentPanel {
     this._setBanner(m[0], m[1], m[2]);
     this.banner.classList.toggle('success', status === 'done');
     this.banner.classList.toggle('fail', status === 'failed');
-    if (status === 'done' || status === 'failed') this._busy = false;
+    if (status === 'done' || status === 'failed') {
+      this._busy = false;
+      this._updateRunButtons(false);
+    }
   }
 
   _onLog(line) {

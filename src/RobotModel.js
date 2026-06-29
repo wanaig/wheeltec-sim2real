@@ -61,6 +61,7 @@ const JOINTS = [
 export const PRESETS = {
   arm_home:            { joint1: 0,    joint2: 0,    joint3: 0,    joint4: 0,    joint5: 0 },
   arm_uplift:          { joint1: 0,    joint2: 0.54, joint3: 1.57, joint4: 1.57, joint5: 0 },
+  arm_place:           { joint1: 0,    joint2: 0.14, joint3: 1.57, joint4: 1.57, joint5: 0 },
   arm_clamp:           { joint1: 0,    joint2: -1.1, joint3: 0.66, joint4: 1,    joint5: 0 },
   arm_rotate_uplift:   { joint1: 1.57, joint2: 0.57, joint3: 1.57, joint4: 1.3,  joint5: 0 },
   arm_rotate_put:      { joint1: 1.57, joint2: -1.1, joint3: 0.66, joint4: 1,    joint5: 0 },
@@ -433,7 +434,9 @@ export class RobotModel {
     for (let i = 0; i < names.length; i++) {
       const n = names[i];
       if (n in this.jointGroups) {
-        this.jointValues[n] = positions[i];
+        const lim = this.jointLimits[n];
+        const v = positions[i];
+        this.jointValues[n] = lim ? Math.max(lim[0], Math.min(lim[1], v)) : v;
         this._applyJoint(n);
       }
     }

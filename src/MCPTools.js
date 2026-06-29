@@ -16,16 +16,26 @@
  * 执行器 MCPToolExecutor 把工具调用路由到 MockAgent/RobotModel/IKSolver。
  */
 import * as THREE from 'three';
-import { PRESETS, GRIPPER_POSES, ARM_JOINT_NAMES } from './RobotModel.js';
+import { PRESETS, GRIPPER_POSES, ARM_JOINT_NAMES, GRIPPER_JOINT_NAMES } from './RobotModel.js';
 
 // ─────────────── 环境碰撞模型 (MoveIt2 Planning Scene 仿真) ───────────────
 
 // 工作台碰撞盒 (AABB): 臂连杆不能穿入这些区域
+// 台面实心: z[0.040, 0.045] (碰撞盒比视觉台面 z=0.060 低 15mm, 给夹爪手指下沉余量);
+// 料箱壁: z[0.060, 0.113] (薄壁, 不覆盖格子内部空间)
 const COLLISION_BOXES = [
-  // 左台 (料箱): 台面 + 料箱壁
-  { name: 'bin_bench', x: [0.15, 0.45], y: [-0.49, -0.11], z: [0.040, 0.115] },
-  // 右台 (工具): 台面
-  { name: 'tool_bench', x: [0.15, 0.45], y: [0.11, 0.49], z: [0.040, 0.115] },
+  // 左台 (料箱) 台面
+  { name: 'bin_bench', x: [0.225, 0.375], y: [-0.49, -0.11], z: [0.040, 0.045] },
+  // 右台 (工具) 台面
+  { name: 'tool_bench', x: [0.225, 0.375], y: [0.11, 0.49], z: [0.040, 0.045] },
+  // 料箱隔板 (4条, 薄壁 y 方向)
+  { name: 'bin_wall_p1', x: [0.25, 0.35], y: [-0.482, -0.478], z: [0.060, 0.113] },
+  { name: 'bin_wall_p2', x: [0.25, 0.35], y: [-0.362, -0.358], z: [0.060, 0.113] },
+  { name: 'bin_wall_p3', x: [0.25, 0.35], y: [-0.242, -0.238], z: [0.060, 0.113] },
+  { name: 'bin_wall_p4', x: [0.25, 0.35], y: [-0.122, -0.118], z: [0.060, 0.113] },
+  // 料箱侧壁 (左右, 薄壁 x 方向)
+  { name: 'bin_wall_left',  x: [0.248, 0.252], y: [-0.48, -0.12], z: [0.060, 0.113] },
+  { name: 'bin_wall_right', x: [0.348, 0.352], y: [-0.48, -0.12], z: [0.060, 0.113] },
 ];
 
 const ARM_BASE_OFFSET = { x: 0.054476, y: 0.00070272, z: 0.156 };
@@ -55,16 +65,36 @@ function _pointInCollision(x, y, z) {
  * @returns {string|null} 碰撞的连杆名, null=无碰撞
  */
 function _checkArmEnvCollision(robot) {
-  const links = ['link1', 'link2', 'link3', 'link4', 'link5'];
-  const p = new THREE.Vector3();
+  robot.root.updateMatrixWorld(true);
+  const links = ['link1', 'link2', 'link3', 'link4', 'link5', 'link6', 'link7', 'link8', 'link9', 'link10', 'link11'];
+  const corner = new THREE.Vector3();
   for (const name of links) {
-    const g = robot.jointGroups[name];
-    if (!g) continue;
-    g.getWorldPosition(p);
-    const hit = _pointInCollision(p.x, p.y, p.z);
-    if (hit) return `${name}↔${hit}`;
+    const mesh = robot.linkMeshes?.[name];
+    const bb = robot.boundingBoxes?.[name];
+    if (!mesh || !bb) continue;
+    const mins = [bb.min.x, bb.min.y, bb.min.z];
+    const maxs = [bb.max.x, bb.max.y, bb.max.z];
+    for (let i = 0; i < 8; i++) {
+      corner.set(
+        (i & 1) ? maxs[0] : mins[0],
+        (i & 2) ? maxs[1] : mins[1],
+        (i & 4) ? maxs[2] : mins[2],
+      ).applyMatrix4(mesh.matrixWorld);
+      const hit = _pointInCollision(corner.x, corner.y, corner.z);
+      if (hit) return `${name}↔${hit}`;
+    }
   }
   return null;
+}
+
+function _jointsWithinLimits(robot, joints) {
+  for (const n of ARM_JOINT_NAMES) {
+    const lim = robot.jointLimits?.[n];
+    if (!lim) continue;
+    const v = joints[n] ?? 0;
+    if (v < lim[0] - 1e-6 || v > lim[1] + 1e-6) return false;
+  }
+  return true;
 }
 
 /**
@@ -95,6 +125,11 @@ function _checkTrajectoryCollision(robot, fromJoints, toJoints, samples = 20) {
     const hit = _checkArmEnvCollision(robot);
     if (hit) {
       collisionFound = hit;
+      break;
+    }
+    const ground = robot._checkGroundCollision?.();
+    if (ground) {
+      collisionFound = `ground↔${ground}`;
       break;
     }
     // 记录最高 TCP Z (用于安全高度)
@@ -197,7 +232,7 @@ export const MCP_TOOLS = [
     type: 'function',
     function: {
       name: 'retract',
-      description: '收回机械臂到安全姿态(抬升joint2-5, 保持当前方向)。总是成功, 不依赖IK。用于抓取/放置后收回, 避免移动底盘时碰撞。',
+      description: '收回机械臂: 多策略垂直抬升(逆序/多解IK/后退脱离)到安全高度, 再收到安全姿态, 保持当前方向。抓取/放置后必须调用。碰撞时系统自动切换策略, 无需手动处理。',
       parameters: {
         type: 'object',
         properties: {
@@ -253,6 +288,7 @@ export class MCPToolExecutor {
     this.chassis = ctx.chassis;
     this.binSlots = ctx.binSlots || {};
     this._plannedTrajectory = null;  // plan_arm_motion → execute_arm_motion
+    this._lastAboveJoints = null;   // 最近一次 plan_arm_motion 下降段"目标正上方"关节角, 供 retract 逆序垂直抬升
     this._logCb = null;
   }
 
@@ -272,7 +308,15 @@ export class MCPToolExecutor {
     angles.push(currentSide);
     for (let i = 0; i < 16; i++) angles.push(i * Math.PI / 8);
 
-    let best = null;
+    // 保存机器人状态 (碰撞验证会修改底盘位姿和关节)
+    const svPos = { x: cur.x, y: cur.y, z: this.robot.root.position.z };
+    const svYaw = curYaw;
+    const svArm = {}; ARM_JOINT_NAMES.forEach(j => svArm[j] = this.robot.getJoint(j));
+    const svGrip = {}; GRIPPER_JOINT_NAMES.forEach(j => svGrip[j] = this.robot.getJoint(j));
+
+    let bestValid = null;  // 碰撞-free 候选
+    let bestAny = null;    // 任意候选 (fallback)
+
     for (const a of angles) {
       const armGoalX = target.x + Math.cos(a) * planarDist;
       const armGoalY = target.y + Math.sin(a) * planarDist;
@@ -281,23 +325,96 @@ export class MCPToolExecutor {
       const x = armGoalX - (cos * ARM_BASE_OFFSET.x - sin * ARM_BASE_OFFSET.y);
       const y = armGoalY - (sin * ARM_BASE_OFFSET.x + cos * ARM_BASE_OFFSET.y);
       if (!_inMobileArea(x, y) || _inBenchFootprint(x, y)) continue;
-
       const armDistance = Math.hypot(target.x - armGoalX, target.y - armGoalY, target.z - ARM_BASE_OFFSET.z);
       if (armDistance > ARM_REACH) continue;
       const travel = Math.hypot(x - cur.x, y - cur.y);
       const turn = Math.abs(_wrapAngle(yaw - curYaw)) * 0.05;
       const score = travel + turn;
-      if (!best || score < best.score) best = { x, y, yaw, score };
+      if (!bestAny || score < bestAny.score) bestAny = { x, y, yaw, score };
+
+      // 碰撞验证: 模拟底盘到位, IK求解 + 下降段碰撞检测 (与 plan_arm_motion c3 一致)
+      this.robot.root.position.set(x, y, 0);
+      this.robot.root.rotation.z = yaw;
+      this.robot.root.updateMatrixWorld(true);
+
+      this.robot.applyJointState(ARM_JOINT_NAMES,
+        ARM_JOINT_NAMES.map(j => PRESETS.arm_place[j] ?? 0));
+      const ikRes = this._multiStartIK(target);
+      if (!ikRes.solved) continue;
+      const ikJ = {};
+      ARM_JOINT_NAMES.forEach(j => ikJ[j] = Math.atan2(
+        Math.sin(ikRes.joints[j]), Math.cos(ikRes.joints[j])));
+
+      // 目标姿态碰撞 (两种夹爪)
+      let goalHit = null;
+      for (const grip of [GRIPPER_POSES.close, GRIPPER_POSES.open]) {
+        this.robot.applyJointState(GRIPPER_JOINT_NAMES,
+          GRIPPER_JOINT_NAMES.map(j => grip[j] ?? 0));
+        this.robot.applyJointState(ARM_JOINT_NAMES, ARM_JOINT_NAMES.map(j => ikJ[j]));
+        const hit = _checkArmEnvCollision(this.robot) || this.robot._checkGroundCollision?.();
+        if (hit) { goalHit = hit; break; }
+      }
+      if (goalHit) continue;
+
+      // Via2: 目标正上方安全高度
+      const safeZ = Math.max(target.z + 0.06, 0.14);
+      this.robot.applyJointState(ARM_JOINT_NAMES,
+        ARM_JOINT_NAMES.map(j => PRESETS.arm_place[j] ?? 0));
+      const r2 = this._multiStartIK(new THREE.Vector3(target.x, target.y, safeZ));
+      if (!r2.solved) continue;
+      const v2J = {};
+      ARM_JOINT_NAMES.forEach(j => v2J[j] = Math.atan2(
+        Math.sin(r2.joints[j]), Math.cos(r2.joints[j])));
+
+      // C3 下降轨迹碰撞 (两种夹爪, 与 plan_arm_motion 完全一致)
+      let c3Hit = null;
+      for (const grip of [GRIPPER_POSES.close, GRIPPER_POSES.open]) {
+        this.robot.applyJointState(GRIPPER_JOINT_NAMES,
+          GRIPPER_JOINT_NAMES.map(j => grip[j] ?? 0));
+        const c = _checkTrajectoryCollision(this.robot, v2J, ikJ, 20);
+        if (c.collision) { c3Hit = c.collision; break; }
+      }
+      if (c3Hit) continue;
+
+      if (!bestValid || score < bestValid.score) bestValid = { x, y, yaw, score };
     }
 
-    if (!best) {
-      best = {
-        x: Math.max(MOBILE_AREA.xMin, Math.min(MOBILE_AREA.xMax, target.x - ARM_BASE_OFFSET.x)),
-        y: Math.max(MOBILE_AREA.yMin, Math.min(MOBILE_AREA.yMax, target.y - ARM_BASE_OFFSET.y)),
-        yaw: 0,
+    // 恢复机器人状态
+    this.robot.root.position.set(svPos.x, svPos.y, svPos.z);
+    this.robot.root.rotation.z = svYaw;
+    this.robot.applyJointState(ARM_JOINT_NAMES, ARM_JOINT_NAMES.map(j => svArm[j]));
+    this.robot.applyJointState(GRIPPER_JOINT_NAMES, GRIPPER_JOINT_NAMES.map(j => svGrip[j]));
+    this.robot.root.updateMatrixWorld(true);
+
+    const best = bestValid || bestAny;
+    if (best) {
+      return {
+        x: +best.x.toFixed(3), y: +best.y.toFixed(3), yaw: +best.yaw.toFixed(3),
+        no_collision_free: !bestValid,
       };
     }
-    return { x: +best.x.toFixed(3), y: +best.y.toFixed(3), yaw: +best.yaw.toFixed(3) };
+
+    // Fallback: 环形搜索安全站位 (不进入工作台占地)
+    for (let r = 0.10; r <= 0.80; r += 0.04) {
+      const n = Math.max(16, Math.ceil(2 * Math.PI * r / 0.04));
+      for (let i = 0; i < n; i++) {
+        const a = i * 2 * Math.PI / n;
+        const fx = target.x - ARM_BASE_OFFSET.x + Math.cos(a) * r;
+        const fy = target.y - ARM_BASE_OFFSET.y + Math.sin(a) * r;
+        if (!_inMobileArea(fx, fy) || _inBenchFootprint(fx, fy)) continue;
+        const armGoalX = fx + ARM_BASE_OFFSET.x, armGoalY = fy + ARM_BASE_OFFSET.y;
+        const armDist = Math.hypot(target.x - armGoalX, target.y - armGoalY, target.z - ARM_BASE_OFFSET.z);
+        if (armDist > ARM_REACH) continue;
+        return { x: +fx.toFixed(3), y: +fy.toFixed(3), yaw: 0, no_collision_free: true };
+      }
+    }
+    // 最终兜底: 取工作台侧方的安全区域
+    return {
+      x: +Math.max(MOBILE_AREA.xMin + CHASSIS_RADIUS, Math.min(0, target.x - ARM_BASE_OFFSET.x)).toFixed(3),
+      y: +(target.y >= 0 ? Math.max(MOBILE_AREA.yMin + CHASSIS_RADIUS, -0.05) : Math.min(MOBILE_AREA.yMax - CHASSIS_RADIUS, 0.05)).toFixed(3),
+      yaw: 0,
+      no_collision_free: true,
+    };
   }
 
   /**
@@ -366,11 +483,26 @@ export class MCPToolExecutor {
 
   // ── move_base ──
   async _moveBase(p) {
-    await this.agent._moveChassisTo(p.x, p.y, p.yaw || 0, 2.0);
+    // 先用 MCP retract 把臂抬到安全高度 (多策略抬升, 优于 _moveChassisTo 的直接插值)
+    // 避免"臂未收回→先抬→碰撞"死循环
+    const curJoints = {};
+    ARM_JOINT_NAMES.forEach(j => curJoints[j] = this.robot.getJoint(j));
+    const isUplift = curJoints['joint2'] > 0.3 && curJoints['joint3'] > 1.0;
+    if (!isUplift) {
+      const r = await this._retract({});
+      if (!r.ok) {
+        return { ok: false, reason: 'arm_stuck', detail: `收回机械臂失败, move_base中止: ${r.detail || r.reason}` };
+      }
+    }
+    const result = await this.agent._moveChassisTo(p.x, p.y, p.yaw || 0, 2.0);
+    if (!result.ok) return result;
     const pos = this.robot.root.position;
+    const dist = Math.hypot(pos.x - p.x, pos.y - p.y);
     return {
       ok: true,
       chassis_position: { x: +pos.x.toFixed(3), y: +pos.y.toFixed(3), yaw: +this.robot.root.rotation.z.toFixed(3) },
+      reached_target: dist < 0.05,
+      target_distance_m: +dist.toFixed(3),
     };
   }
 
@@ -385,9 +517,10 @@ export class MCPToolExecutor {
     const targetYaw = Math.atan2(target.y - armBase.y, target.x - armBase.x);
 
     // 起始姿态: joint1预旋转到目标方向 + 不同planar初始姿态
-    // CCD只需求解planar问题 (joint2-4), 不再需要同时旋转joint1, 大幅提高收敛率
+    // arm_place (joint2=0.14) 优先: 更竖直, 避免连杆与料箱壁/工作台碰撞
     const startPoints = [
       { name: 'current', joints: cur },
+      { name: 'pre_rot_place',  joints: { joint1: targetYaw, joint2: 0.14, joint3: 1.57, joint4: 1.57, joint5: 0 } },
       { name: 'pre_rot_up',    joints: { joint1: targetYaw, joint2: 0.54, joint3: 1.57, joint4: 1.57, joint5: 0 } },
       { name: 'pre_rot_reach', joints: { joint1: targetYaw, joint2: -0.8,  joint3: 1.2,  joint4: 1.0,  joint5: 0 } },
       { name: 'pre_rot_home',  joints: { joint1: targetYaw, joint2: 0,    joint3: 0,    joint4: 0,    joint5: 0 } },
@@ -425,6 +558,38 @@ export class MCPToolExecutor {
     return best;
   }
 
+  /** 返回所有IK解 (不同分支), 供 retract 逐个尝试碰撞检测 */
+  _multiIKSolutions(target) {
+    const cur = {};
+    ARM_JOINT_NAMES.forEach(j => cur[j] = this.robot.getJoint(j));
+    const armBase = new THREE.Vector3();
+    this.robot.jointGroups['joint1'].getWorldPosition(armBase);
+    const targetYaw = Math.atan2(target.y - armBase.y, target.x - armBase.x);
+    const startPoints = [
+      { joints: cur },
+      { joints: { joint1: targetYaw, joint2: 0.14, joint3: 1.57, joint4: 1.57, joint5: 0 } },
+      { joints: { joint1: targetYaw, joint2: 0.54, joint3: 1.57, joint4: 1.57, joint5: 0 } },
+      { joints: { joint1: targetYaw, joint2: -0.8,  joint3: 1.2,  joint4: 1.0,  joint5: 0 } },
+      { joints: { joint1: targetYaw, joint2: 0,    joint3: 0,    joint4: 0,    joint5: 0 } },
+      { joints: PRESETS.arm_uplift },
+      { joints: PRESETS.arm_home },
+    ];
+    const solutions = [];
+    for (const sp of startPoints) {
+      this.robot.applyJointState(ARM_JOINT_NAMES,
+        ARM_JOINT_NAMES.map(j => sp.joints[j] ?? 0));
+      const result = this.ik.solve(target);
+      if (result.solved) {
+        const joints = {};
+        ARM_JOINT_NAMES.forEach(j => joints[j] = this.robot.getJoint(j));
+        solutions.push({ error: result.error, joints });
+      }
+    }
+    this.robot.applyJointState(ARM_JOINT_NAMES,
+      ARM_JOINT_NAMES.map(j => cur[j]));
+    return solutions;
+  }
+
   // ── plan_arm_motion (MoveIt2: 多起始IK + 碰撞检测 + 经由点轨迹 + 自动执行) ──
   async _planArmMotion(p) {
     const target = new THREE.Vector3(p.x, p.y, p.z);
@@ -443,20 +608,33 @@ export class MCPToolExecutor {
         detail: `IK求解失败(多起始点), 最小误差${(ikResult.error * 1000).toFixed(1)}mm (from ${ikResult.start})`,
         error_mm: +(ikResult.error * 1000).toFixed(1),
         suggested_chassis: suggested,
-        hint: `建议先move_base到(${suggested.x.toFixed(2)}, ${suggested.y.toFixed(2)}, yaw=${suggested.yaw.toFixed(2)})再重试`,
+        hint: suggested.no_collision_free
+          ? '⚠ 所有站位均无法避免碰撞或不可达, 请更换目标或放弃'
+          : `建议先move_base到(${suggested.x.toFixed(2)}, ${suggested.y.toFixed(2)}, yaw=${suggested.yaw.toFixed(2)})再重试`,
       };
     }
 
     const ikJoints = {};
     ARM_JOINT_NAMES.forEach(j => ikJoints[j] = Math.atan2(
       Math.sin(ikResult.joints[j]), Math.cos(ikResult.joints[j])));
+    if (!_jointsWithinLimits(this.robot, ikJoints)) {
+      return { ok: false, reason: 'joint_limit', detail: '目标姿态超出URDF关节角度限制' };
+    }
 
     // 2. 检查目标姿态碰撞
     this.robot.applyJointState(ARM_JOINT_NAMES, ARM_JOINT_NAMES.map(j => ikJoints[j]));
-    const goalCollision = _checkArmEnvCollision(this.robot);
+    const goalCollision = _checkArmEnvCollision(this.robot) || this.robot._checkGroundCollision?.();
     this.robot.applyJointState(ARM_JOINT_NAMES, ARM_JOINT_NAMES.map(j => cur[j]));
     if (goalCollision) {
-      return { ok: false, reason: 'goal_collision', detail: `目标姿态碰撞: ${goalCollision}` };
+      const suggested = this._suggestChassisFor(target);
+      return {
+        ok: false, reason: 'goal_collision',
+        detail: `目标姿态碰撞: ${goalCollision}`,
+        suggested_chassis: suggested,
+        hint: suggested.no_collision_free
+          ? '⚠ 所有站位均无法避免碰撞, 目标可能与工作台表面过近。请勿继续重试同一目标, 更换目标或放弃'
+          : `建议先move_base到(${suggested.x.toFixed(2)}, ${suggested.y.toFixed(2)}, yaw=${suggested.yaw.toFixed(2)})再重试`,
+      };
     }
 
     // 3. 始终使用经由点轨迹 (抬起→水平→下降), 运动更自然可见
@@ -474,33 +652,56 @@ export class MCPToolExecutor {
     if (via2Joints) ARM_JOINT_NAMES.forEach(j => via2Joints[j] = Math.atan2(
       Math.sin(r2.joints[j]), Math.cos(r2.joints[j])));
 
-    let segments = [];
-
-    // Seg1: 抬升 (仅当当前高度低于安全高度)
-    if (via1Joints && tcpNow.z < safeZ - 0.01) {
-      const c1 = _checkTrajectoryCollision(this.robot, cur, via1Joints, 15);
-      if (!c1.collision) segments.push({ joints: via1Joints, duration: 1.0, desc: '抬升到安全高度' });
-    }
-
-    // Seg2: 水平移动 (仅当XY距离 > 2cm)
+    const segments = [];
     const xyDist = Math.hypot(target.x - tcpNow.x, target.y - tcpNow.y);
-    if (via1Joints && via2Joints && xyDist > 0.02) {
-      this.robot.applyJointState(ARM_JOINT_NAMES, ARM_JOINT_NAMES.map(j => via1Joints[j]));
-      const c2 = _checkTrajectoryCollision(this.robot, via1Joints, via2Joints, 20);
-      this.robot.applyJointState(ARM_JOINT_NAMES, ARM_JOINT_NAMES.map(j => cur[j]));
-      if (!c2.collision) segments.push({ joints: via2Joints, duration: 1.5, desc: '水平移动到目标上方' });
+    let segmentStart = cur;
+
+    if (tcpNow.z < safeZ - 0.01) {
+      if (!via1Joints) return { ok: false, reason: 'via_ik_failed', detail: '安全抬升点不可达' };
+      const c1 = _checkTrajectoryCollision(this.robot, segmentStart, via1Joints, 20);
+      if (c1.collision) return { ok: false, reason: 'trajectory_collision', detail: `抬升段碰撞: ${c1.collision}` };
+      segments.push({ joints: via1Joints, duration: 1.0, desc: '抬升到安全高度' });
+      segmentStart = via1Joints;
     }
 
-    // Seg3: 下降到目标
-    if (via2Joints) {
-      const c3 = _checkTrajectoryCollision(this.robot, via2Joints, ikJoints, 15);
-      if (!c3.collision) segments.push({ joints: ikJoints, duration: 1.0, desc: '下降到目标' });
+    if (xyDist > 0.02) {
+      if (!via2Joints) return { ok: false, reason: 'via_ik_failed', detail: '目标上方安全点不可达' };
+      const c2 = _checkTrajectoryCollision(this.robot, segmentStart, via2Joints, 24);
+      if (c2.collision) return { ok: false, reason: 'trajectory_collision', detail: `水平移动段碰撞: ${c2.collision}` };
+      segments.push({ joints: via2Joints, duration: 1.5, desc: '水平移动到目标上方' });
+      segmentStart = via2Joints;
     }
 
-    // 经由点全部失败 → 直接插值
-    if (segments.length === 0) {
-      segments = [{ joints: ikJoints, duration: 2.0, desc: '直达目标' }];
+    // 下降段碰撞检测: 同时检查夹爪闭合和张开两种状态
+    // 抓取后 retract 用闭合, 放置后 retract 用张开 — 两种都必须无碰撞
+    // 否则只查一种 → 另一种位姿下 link7 等连杆位置不同可能碰撞 → retract 卡死
+    const _savedGrip = {};
+    GRIPPER_JOINT_NAMES.forEach(j => _savedGrip[j] = this.robot.getJoint(j));
+    let c3Hit = null;
+    for (const [label, grip] of [['闭合', GRIPPER_POSES.close], ['张开', GRIPPER_POSES.open]]) {
+      this.robot.applyJointState(GRIPPER_JOINT_NAMES,
+        GRIPPER_JOINT_NAMES.map(j => grip[j] ?? 0));
+      const c = _checkTrajectoryCollision(this.robot, segmentStart, ikJoints, 20);
+      if (c.collision) { c3Hit = `夹爪${label}:${c.collision}`; break; }
     }
+    this.robot.applyJointState(GRIPPER_JOINT_NAMES,
+      GRIPPER_JOINT_NAMES.map(j => _savedGrip[j]));
+    if (c3Hit) {
+      const suggested = this._suggestChassisFor(target);
+      return {
+        ok: false,
+        reason: 'trajectory_collision',
+        detail: `目标接近段碰撞(${c3Hit})`,
+        suggested_chassis: suggested,
+        hint: suggested.no_collision_free
+          ? '⚠ 所有站位均无法避免碰撞, 目标可能与工作台表面过近。请勿继续重试同一目标, 更换目标或放弃'
+          : `建议先move_base到(${suggested.x.toFixed(2)}, ${suggested.y.toFixed(2)}, yaw=${suggested.yaw.toFixed(2)})再重试`,
+      };
+    }
+    // 记录"目标正上方安全高度"关节角, 供后续 retract 做逆序垂直抬升
+    // (抬升 = 下降的精确逆, 下降已用两种夹爪状态通过碰撞检测 ⇒ 逆序必然无碰撞)
+    this._lastAboveJoints = { ...segmentStart };
+    segments.push({ joints: ikJoints, duration: xyDist > 0.02 ? 1.0 : 1.5, desc: xyDist > 0.02 ? '下降到目标' : '安全直达目标' });
 
     // 5. 恢复原始关节, 然后自动执行轨迹 (避免碰撞检测残留导致抽搐)
     this.robot.applyJointState(ARM_JOINT_NAMES, ARM_JOINT_NAMES.map(j => cur[j]));
@@ -550,11 +751,92 @@ export class MCPToolExecutor {
     return { ok: true, released_at: { x: +tcp.x.toFixed(3), y: +tcp.y.toFixed(3), z: +tcp.z.toFixed(3) } };
   }
 
-  // ── retract (收回机械臂到安全姿态, 保持当前方向, 不依赖IK) ──
+  // ── retract (收回机械臂: 垂直抬升 + 安全收臂, 从上往下抓取/放置的逆操作) ──
   async _retract(p = {}) {
     const cur = {};
     ARM_JOINT_NAMES.forEach(j => cur[j] = this.robot.getJoint(j));
-    // 保持当前joint1方向, 只抬升joint2-5到安全姿态 (避免不必要旋转)
+    const tcpNow = this.robot.getGripperTCP();
+    // 安全收回高度: 高于工作台(0.060)与料箱壁(0.113), 确保抬起后连杆不穿模
+    const SAFE_RETRACT_Z = 0.16;
+
+    const segments = [];
+    let segStart = cur;
+
+    // ── 阶段1a: 逆序抬升 (复用 plan_arm_motion 记录的"目标正上方"关节角) ──
+    //   抬升 = 下降的精确逆序, 下降已用闭合夹爪通过碰撞检测 ⇒ 逆序必然无碰撞
+    if (this._lastAboveJoints) {
+      const above = this._lastAboveJoints;
+      const c = _checkTrajectoryCollision(this.robot, cur, above, 20);
+      if (!c.collision) {
+        segments.push({ joints: above, duration: 0.9, desc: '垂直抬升到安全高度' });
+        segStart = above;
+      } else {
+        this._log(`[MCP] 逆序抬升碰撞, 改用多策略抬升: ${c.collision}`);
+      }
+      this._lastAboveJoints = null;  // 一次性消费
+    }
+
+    // ── 阶段1b: 多解IK垂直抬升 (尝试所有分支解, 选首个无碰撞的) ──
+    if (segments.length === 0 && tcpNow.z < SAFE_RETRACT_Z - 0.01) {
+      const liftZ = Math.max(tcpNow.z + (p.lift ?? 0.08), SAFE_RETRACT_Z);
+      const sols = this._multiIKSolutions(new THREE.Vector3(tcpNow.x, tcpNow.y, liftZ));
+      for (const sol of sols) {
+        const liftJoints = {};
+        ARM_JOINT_NAMES.forEach(j => liftJoints[j] = Math.atan2(
+          Math.sin(sol.joints[j]), Math.cos(sol.joints[j])));
+        if (!_jointsWithinLimits(this.robot, liftJoints)) continue;
+        const c = _checkTrajectoryCollision(this.robot, cur, liftJoints, 20);
+        if (!c.collision) {
+          segments.push({ joints: liftJoints, duration: 0.9, desc: '垂直抬升到安全高度' });
+          segStart = liftJoints;
+          break;
+        }
+      }
+    }
+
+    // ── 阶段1c: 后退脱离 + 抬升 (臂伸出在工作台上方时, 先向臂基座方向后退再抬起) ──
+    if (segments.length === 0) {
+      const armBase = new THREE.Vector3();
+      this.robot.jointGroups['joint1'].getWorldPosition(armBase);
+      const dx = armBase.x - tcpNow.x;
+      const dy = armBase.y - tcpNow.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 0.02) {
+        const step = Math.min(0.06, dist * 0.3);
+        const rx = tcpNow.x + (dx / dist) * step;
+        const ry = tcpNow.y + (dy / dist) * step;
+        // 后退 (同高度)
+        const rs = this._multiIKSolutions(new THREE.Vector3(rx, ry, tcpNow.z));
+        for (const sol of rs) {
+          const rj = {};
+          ARM_JOINT_NAMES.forEach(j => rj[j] = Math.atan2(
+            Math.sin(sol.joints[j]), Math.cos(sol.joints[j])));
+          if (!_jointsWithinLimits(this.robot, rj)) continue;
+          const c = _checkTrajectoryCollision(this.robot, cur, rj, 16);
+          if (!c.collision) {
+            segments.push({ joints: rj, duration: 0.6, desc: '后退脱离障碍' });
+            // 从后退位置垂直抬升
+            const liftZ = Math.max(tcpNow.z + 0.08, SAFE_RETRACT_Z);
+            const ls = this._multiIKSolutions(new THREE.Vector3(rx, ry, liftZ));
+            for (const sol2 of ls) {
+              const lj = {};
+              ARM_JOINT_NAMES.forEach(j => lj[j] = Math.atan2(
+                Math.sin(sol2.joints[j]), Math.cos(sol2.joints[j])));
+              if (!_jointsWithinLimits(this.robot, lj)) continue;
+              const c2 = _checkTrajectoryCollision(this.robot, rj, lj, 20);
+              if (!c2.collision) {
+                segments.push({ joints: lj, duration: 0.8, desc: '垂直抬升到安全高度' });
+                segStart = lj;
+                break;
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
+
+    // ── 阶段2: 过渡到安全收臂姿态 (非致命: 碰撞则跳过, 臂已在安全高度可移动底盘) ──
     const retractPose = {
       joint1: cur['joint1'],
       joint2: PRESETS.arm_uplift.joint2,
@@ -562,10 +844,23 @@ export class MCPToolExecutor {
       joint4: PRESETS.arm_uplift.joint4,
       joint5: 0,
     };
+    const c2 = _checkTrajectoryCollision(this.robot, segStart, retractPose, 20);
+    if (!c2.collision) {
+      segments.push({ joints: retractPose, duration: 0.9, desc: '收回至安全姿态' });
+    }
+
+    if (segments.length === 0) {
+      return { ok: false, reason: 'trajectory_collision', detail: '收回轨迹碰撞 (所有抬升策略均失败)' };
+    }
+
     this._log(`[MCP] 收回机械臂到安全姿态 (保持方向 joint1=${cur['joint1'].toFixed(2)})`);
-    await new Promise(resolve => {
-      this.robot.tweenTo(retractPose, 1.0, () => resolve());
-    });
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      this._log(`[MCP] 执行段 ${i + 1}/${segments.length}: ${seg.desc} (${seg.duration}s)`);
+      await new Promise(resolve => {
+        this.robot.tweenTo(seg.joints, seg.duration, () => resolve());
+      });
+    }
     const tcp = this.robot.getGripperTCP();
     return {
       ok: true,
@@ -612,8 +907,8 @@ export class MCPToolExecutor {
       arm_base_offset: { x: ARM_BASE_OFFSET.x, y: ARM_BASE_OFFSET.y, z: ARM_BASE_OFFSET.z },
       arm_reach_m: ARM_REACH,
       workbenches: {
-        bin_bench: { center: [0.30, -0.30], y_range: [-0.49, -0.11], x_range: [0.15, 0.45], z_range: [0.04, 0.115] },
-        tool_bench: { center: [0.30, 0.30], y_range: [0.11, 0.49], x_range: [0.15, 0.45], z_range: [0.04, 0.115] },
+        bin_bench: { center: [0.30, -0.30], y_range: [-0.49, -0.11], x_range: [0.15, 0.45], z_range: [0.04, 0.045] },
+        tool_bench: { center: [0.30, 0.30], y_range: [0.11, 0.49], x_range: [0.15, 0.45], z_range: [0.04, 0.045] },
         mobile_area: { x_range: [MOBILE_AREA.xMin, MOBILE_AREA.xMax], y_range: [MOBILE_AREA.yMin, MOBILE_AREA.yMax], note: '底盘可在覆盖双工作区的大作业区内自由移动, 路径规划会按底盘footprint避开工作台' },
       },
       chassis_safety: { radius_m: CHASSIS_RADIUS, clearance_m: CHASSIS_CLEARANCE },

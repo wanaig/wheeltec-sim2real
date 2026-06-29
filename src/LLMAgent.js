@@ -24,7 +24,7 @@ const SYSTEM_PROMPT = `你是一个工业机械臂小车的自主作业智能体
 
 ## 场景描述
 - 双工作台: 左台料箱(3格), 右台工具, 机械臂小车大作业区覆盖两个工作区和中间区域
-- 工作台X范围[0.15,0.45], 左台Y[-0.49,-0.11], 右台Y[0.11,0.49]
+- 工作台X范围[0.225,0.375], 左台Y[-0.49,-0.11], 右台Y[0.11,0.49]
 - 底盘可在大作业区内自由移动并规划最近路径, 但必须按小车footprint避开工作台; 优先使用工具返回的 suggested_chassis
 - 机械臂臂展0.40m, 基座[0.054, 0.001, 0.156]
 
@@ -45,7 +45,7 @@ perceive, get_scene_info, get_robot_state, move_base, plan_arm_motion, grasp, re
 - grasp 抓取
 
 ### 3. 收回
-- retract (预设安全姿态, 总是成功)
+- retract: 垂直抬升收回 (从上往下抓取/放置的逆操作, 抓取/放置后立即调用)
 
 ### 4. 放置
 - 检查到料箱格子的距离
@@ -60,15 +60,26 @@ perceive, get_scene_info, get_robot_state, move_base, plan_arm_motion, grasp, re
 ## 关键规则
 - ★ plan_arm_motion 一次调用完成规划+执行, 无需单独 execute
 - ★ plan_arm_motion 直接传目标坐标即可, 规划器自动经安全高度绕行, 无需先到上方
+- ★ 抓取/放置均为从上往下: 规划器先到目标正上方再垂直下降; retract 为其逆操作(垂直抬升), 抓取/放置后立即调用
 - ★ perceive/plan_arm_motion 返回 suggested_chassis 时, 直接 move_base 到该坐标
 - ★ 抓取后必须 retract, 放置后必须 retract, move_base 前必须 retract
+- ★ move_base 会自动先收回机械臂到安全高度 (多策略抬升), 无需手动 retract 后再 move_base
 - ★ 底盘不再限制在窄过道内, 可进入覆盖双工作区的大作业区; move_base 会按小车footprint避障并优先走最近可达站位
 - 可以在同一轮调用多个无依赖的工具 (如 perceive + get_scene_info)
 
-## 失败恢复
+## 失败恢复 (必须严格遵守)
 - ik_unreachable: 按返回的 suggested_chassis 移动底盘后重试
+- plan_arm_motion 碰撞 (trajectory_collision / goal_collision):
+  ★ 检查 suggested_chassis 中的 no_collision_free 字段!
+  ★ 如果 no_collision_free=true: 表示所有站位均无法避免碰撞, 此目标不可抓取! 必须放弃此目标, 换另一个同类工具或告知用户无法完成
+  ★ 如果 no_collision_free 不存在或 false: 按 suggested_chassis move_base 换站位后再 plan_arm_motion
+  ★ 禁止修改坐标重试! 必须先 move_base 换站位
+  ★ 同一目标 plan_arm_motion 失败2次后, 必须换另一个同类目标, 不要在同一个目标上死循环
+- move_base 失败 (path_not_found): 目标站位太近或不可达, 换一个不同角度的站位重试
+- move_base 失败 (arm_stuck): 先 release 再 retract, 然后重试 move_base
 - grasp失败: 偏移抓取点
-- 最多重试4次
+- ★ 系统会自动检测重复调用和连续失败, 连续5次失败将自动终止对话
+- 最多重试4次, 超过后总结失败原因并结束
 
 ## 输出要求
 - 中文回复, 每步简要说明理由
@@ -81,11 +92,21 @@ export class LLMAgent {
     this.apiBase = config.apiBase || 'https://api.openai.com/v1';
     this.apiKey = config.apiKey || '';
     this.model = config.model || 'gpt-4o';
-    this.maxTurns = config.maxTurns || 30;  // 最大对话轮数
+    this.maxTurns = config.maxTurns || 100;  // 最大对话轮数
     this.executor = null;  // MCPToolExecutor
     this.onLog = null;
     this.onToolCall = null;
     this.messages = [];
+    this._aborted = false;
+    this._abortCtrl = null;
+  }
+
+  /** 用户手动停止对话 */
+  stop() {
+    this._aborted = true;
+    if (this._abortCtrl) {
+      try { this._abortCtrl.abort(); } catch (e) {}
+    }
   }
 
   setExecutor(executor) { this.executor = executor; }
@@ -106,18 +127,32 @@ export class LLMAgent {
       return { ok: false, summary: 'MCP 执行器未初始化', turns: 0 };
     }
 
+    this._aborted = false;
+    this._abortCtrl = new AbortController();
     this.messages = [
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: instruction },
     ];
 
+    // 循环检测状态
+    this._failCount = 0;           // 连续失败计数
+    this._planFailTarget = null;    // 最近失败的 plan_arm_motion 目标坐标
+    this._planFailCount = 0;        // 同一目标 plan_arm_motion 失败次数
+    this._callHistory = [];         // 近期工具调用 (用于重复检测)
+
+    const MAX_CONSECUTIVE_FAILURES = 5;
+    const WARN_THRESHOLD = 3;
+
     let turns = 0;
-    while (turns < this.maxTurns) {
+    while (turns < this.maxTurns && !this._aborted) {
       turns++;
       this._log(`[LLM] 第${turns}轮对话...`);
 
       // 调用大模型
       const response = await this._callAPI();
+      if (this._aborted) {
+        return { ok: false, summary: '用户已停止对话', turns };
+      }
       if (!response.ok) {
         return { ok: false, summary: `API调用失败: ${response.error}`, turns };
       }
@@ -153,17 +188,73 @@ export class LLMAgent {
 
         if (this.onToolCall) this.onToolCall(toolName, params);
 
-        const result = await this.executor.execute(toolName, params);
+        // 重复调用检测: 同一 tool+params 在最近 3 次调用中出现过 → 跳过
+        const callKey = `${toolName}:${JSON.stringify(params)}`;
+        const recentKeys = this._callHistory.slice(-3);
+        let result;
+        if (recentKeys.includes(callKey)) {
+          result = {
+            ok: false, reason: 'duplicate_call',
+            detail: '此调用与最近3次内的调用完全相同, 已跳过。请更换策略或目标, 不要重复调用。',
+          };
+          this._log(`[LLM] ⚠ 重复调用 ${toolName}, 跳过`);
+        } else {
+          this._callHistory.push(callKey);
+          if (this._callHistory.length > 20) this._callHistory.shift();
+          result = await this.executor.execute(toolName, params);
+        }
 
-        // 工具结果回传大模型
+        // 连续失败追踪
+        if (result.ok === false) {
+          this._failCount++;
+          if (toolName === 'plan_arm_motion') {
+            const tk = `${(params.x ?? 0).toFixed(3)},${(params.y ?? 0).toFixed(3)},${(params.z ?? 0).toFixed(3)}`;
+            if (tk === this._planFailTarget) {
+              this._planFailCount++;
+            } else {
+              this._planFailTarget = tk;
+              this._planFailCount = 1;
+            }
+          }
+        } else {
+          this._failCount = 0;
+          this._planFailTarget = null;
+          this._planFailCount = 0;
+        }
+
+        // 构建工具结果 (失败达阈值时追加警告)
+        let content = JSON.stringify(result);
+        if (this._failCount >= WARN_THRESHOLD) {
+          const w = this._planFailCount >= 2
+            ? `同一目标(${this._planFailTarget})plan_arm_motion已失败${this._planFailCount}次, 必须更换目标或放弃`
+            : '请更换策略, 不要重复相同的操作';
+          content += `\n\n⚠ [系统警告] 已连续${this._failCount}次工具调用失败。${w}。`;
+          this._log(`[LLM] ⚠ 连续${this._failCount}次失败, 已向模型发出警告`);
+        }
+
         this.messages.push({
           role: 'tool',
           tool_call_id: tc.id,
-          content: JSON.stringify(result),
+          content,
         });
+
+        // 熔断: 连续失败达上限 → 终止
+        if (this._failCount >= MAX_CONSECUTIVE_FAILURES) {
+          this._log(`[LLM] 连续${this._failCount}次工具调用失败, 自动终止 (防止死循环)`);
+          return {
+            ok: false,
+            summary: `连续${this._failCount}次工具调用失败, 自动终止`,
+            turns,
+          };
+        }
+
+        if (this._aborted) break;
       }
     }
 
+    if (this._aborted) {
+      return { ok: false, summary: '用户已停止对话', turns };
+    }
     return { ok: false, summary: `达到最大轮数(${this.maxTurns})`, turns };
   }
 
@@ -183,6 +274,7 @@ export class LLMAgent {
 
       const resp = await fetch(`${this.apiBase}/chat/completions`, {
         method: 'POST',
+        signal: this._abortCtrl?.signal,
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${this.apiKey}`,
@@ -205,6 +297,9 @@ export class LLMAgent {
       const data = await resp.json();
       return { ok: true, data };
     } catch (e) {
+      if (e.name === 'AbortError') {
+        return { ok: false, aborted: true, error: '已停止' };
+      }
       return { ok: false, error: e.message };
     }
   }

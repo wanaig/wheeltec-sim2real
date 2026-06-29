@@ -14,7 +14,7 @@
  *   // 渲染循环里: mockAgent.update();
  */
 import * as THREE from 'three';
-import { PRESETS, GRIPPER_POSES, ARM_JOINT_NAMES } from './RobotModel.js';
+import { PRESETS, GRIPPER_POSES, ARM_JOINT_NAMES, WHEEL_JOINT_NAMES } from './RobotModel.js';
 import {
   createToolMesh, TOOL_CN, generateLayout,
   LAYOUTS, LAYOUT_NAMES, LAYOUT_CN,
@@ -117,7 +117,7 @@ export class MockAgent {
   // ─── 3D 工业场景 (双工作台: 左料箱台 / 中过道 / 右工具台) ───
   _buildScene3D() {
     const benchTopZ = 0.060;  // 台面顶 (离地6cm)
-    const benchCx = 0.30, benchW = 0.30, benchD = 0.38, benchT = 0.020;
+    const benchCx = 0.30, benchW = 0.15, benchD = 0.38, benchT = 0.020;
     const benchMat = new THREE.MeshStandardMaterial({ color: 0x3A3A44, metalness: 0.6, roughness: 0.35 });
     const legMat = new THREE.MeshStandardMaterial({ color: 0x2A2A30, metalness: 0.5, roughness: 0.4 });
     const legH = benchTopZ - benchT;  // 0.040m
@@ -394,14 +394,84 @@ export class MockAgent {
 
   // 工作台占地范围 (底盘不能进入)
   static BENCH_FOOTPRINTS = [
-    { xMin: 0.15, xMax: 0.45, yMin: -0.49, yMax: -0.11 }, // 左台(料箱)
-    { xMin: 0.15, xMax: 0.45, yMin: 0.11, yMax: 0.49 },   // 右台(工具)
+    { xMin: 0.225, xMax: 0.375, yMin: -0.49, yMax: -0.11 }, // 左台(料箱)
+    { xMin: 0.225, xMax: 0.375, yMin: 0.11, yMax: 0.49 },   // 右台(工具)
   ];
   // 底盘可移动大作业区 (覆盖双工作台和中间区域, 但不能压到工作台本体)
   static MOBILE_AREA = { xMin: -0.25, xMax: 0.70, yMin: -0.62, yMax: 0.62 };
   static CHASSIS_RADIUS = 0.13;
   static CHASSIS_CLEARANCE = 0.03;
   static ARM_COMFORT_DIST = 0.28;
+  static ARM_COLLISION_LINKS = ['link1', 'link2', 'link3', 'link4', 'link5', 'link6', 'link7', 'link8', 'link9', 'link10', 'link11'];
+  static ARM_COLLISION_BOXES = [
+    // 台面实心 (碰撞盒 z 顶 = 0.045, 低于视觉台面 0.060, 给夹爪手指下沉余量)
+    { name: 'bin_bench', x: [0.225, 0.375], y: [-0.49, -0.11], z: [0.040, 0.045] },
+    { name: 'tool_bench', x: [0.225, 0.375], y: [0.11, 0.49], z: [0.040, 0.045] },
+    // 料箱隔板 (4条, 薄壁)
+    { name: 'bin_wall_p1', x: [0.25, 0.35], y: [-0.482, -0.478], z: [0.060, 0.113] },
+    { name: 'bin_wall_p2', x: [0.25, 0.35], y: [-0.362, -0.358], z: [0.060, 0.113] },
+    { name: 'bin_wall_p3', x: [0.25, 0.35], y: [-0.242, -0.238], z: [0.060, 0.113] },
+    { name: 'bin_wall_p4', x: [0.25, 0.35], y: [-0.122, -0.118], z: [0.060, 0.113] },
+    // 料箱侧壁 (左右)
+    { name: 'bin_wall_left',  x: [0.248, 0.252], y: [-0.48, -0.12], z: [0.060, 0.113] },
+    { name: 'bin_wall_right', x: [0.348, 0.352], y: [-0.48, -0.12], z: [0.060, 0.113] },
+  ];
+
+  _pointInArmObstacle(x, y, z) {
+    for (const box of MockAgent.ARM_COLLISION_BOXES) {
+      if (x >= box.x[0] && x <= box.x[1] && y >= box.y[0] && y <= box.y[1] && z >= box.z[0] && z <= box.z[1]) {
+        return box.name;
+      }
+    }
+    return null;
+  }
+
+  _checkArmEnvCollision() {
+    this.robot.root.updateMatrixWorld(true);
+    const corner = new THREE.Vector3();
+    for (const name of MockAgent.ARM_COLLISION_LINKS) {
+      const mesh = this.robot.linkMeshes?.[name];
+      const bb = this.robot.boundingBoxes?.[name];
+      if (!mesh || !bb) continue;
+      const mins = [bb.min.x, bb.min.y, bb.min.z];
+      const maxs = [bb.max.x, bb.max.y, bb.max.z];
+      for (let i = 0; i < 8; i++) {
+        corner.set(
+          (i & 1) ? maxs[0] : mins[0],
+          (i & 2) ? maxs[1] : mins[1],
+          (i & 4) ? maxs[2] : mins[2],
+        ).applyMatrix4(mesh.matrixWorld);
+        const hit = this._pointInArmObstacle(corner.x, corner.y, corner.z);
+        if (hit) return `${name}<->${hit}`;
+      }
+    }
+    const ground = this.robot._checkGroundCollision?.();
+    return ground ? `ground<->${ground}` : null;
+  }
+
+  _checkArmTrajectoryCollision(targetMap, samples = 24) {
+    const names = Object.keys(targetMap).filter(n => ARM_JOINT_NAMES.includes(n));
+    if (!names.length) return null;
+    const saved = ARM_JOINT_NAMES.map(n => this.robot.getJoint(n));
+    const from = Object.fromEntries(ARM_JOINT_NAMES.map(n => [n, this.robot.getJoint(n)]));
+    const to = { ...from, ...targetMap };
+    for (const n of ARM_JOINT_NAMES) {
+      const lim = this.robot.jointLimits?.[n];
+      if (lim && (to[n] < lim[0] - 1e-6 || to[n] > lim[1] + 1e-6)) return `${n}_limit`;
+    }
+    for (let i = 0; i <= samples; i++) {
+      const t = i / samples;
+      const vals = ARM_JOINT_NAMES.map(n => from[n] + (to[n] - from[n]) * t);
+      this.robot.applyJointState(ARM_JOINT_NAMES, vals);
+      const hit = this._checkArmEnvCollision();
+      if (hit) {
+        this.robot.applyJointState(ARM_JOINT_NAMES, saved);
+        return hit;
+      }
+    }
+    this.robot.applyJointState(ARM_JOINT_NAMES, saved);
+    return null;
+  }
 
   _isInMobileArea(x, y) {
     const a = MockAgent.MOBILE_AREA;
@@ -497,7 +567,24 @@ export class MockAgent {
     const wx = (i) => area.xMin + i * res;
     const wy = (i) => area.yMin + i * res;
     const sx = ix(start.x), sy = iy(start.y);
-    const gx = ix(goal.x), gy = iy(goal.y);
+    let gx = ix(goal.x), gy = iy(goal.y);
+    // 网格离散化可能导致目标格不安全 → 搜索最近安全格
+    if (!this._isChassisPoseSafe(wx(gx), wy(gy))) {
+      let found = null;
+      for (let r = 1; r <= 30 && !found; r++) {
+        for (let i = -r; i <= r && !found; i++) {
+          for (const [cx, cy] of [[i,r],[i,-r],[r,i],[-r,i]]) {
+            const nx = gx + cx, ny = gy + cy;
+            if (this._isChassisPoseSafe(wx(nx), wy(ny))) { found = { x: nx, y: ny }; break; }
+          }
+        }
+      }
+      if (found) { gx = found.x; gy = found.y; }
+      else {
+        this._log('[chassis] 目标附近无安全格, 保持当前位置');
+        return [start];
+      }
+    }
     const key = (x, y) => `${x},${y}`;
     const open = [{ x: sx, y: sy, g: 0, f: Math.hypot(gx - sx, gy - sy) }];
     const came = new Map();
@@ -648,6 +735,11 @@ export class MockAgent {
 
   // ─── 执行 ───
   async _tween(target, duration) {
+    const hit = this._checkArmTrajectoryCollision(target);
+    if (hit) {
+      this._log(`[arm] 拒绝执行: 轨迹碰撞 ${hit}`);
+      return { ok: false, reason: 'trajectory_collision', detail: hit };
+    }
     return new Promise(resolve => {
       this.robot.tweenTo(target, duration, () => resolve({ ok: true }));
     });
@@ -682,49 +774,111 @@ export class MockAgent {
     if (!isUplift) {
       this._log('[chassis] 臂未收回, 先抬到安全高度');
       // 保持当前joint1方向, 只抬升joint2-5 (避免不必要旋转)
-      await new Promise(resolve => {
-        this.robot.tweenTo({
-          joint1: curJoints['joint1'],
-          joint2: PRESETS.arm_uplift.joint2,
-          joint3: PRESETS.arm_uplift.joint3,
-          joint4: PRESETS.arm_uplift.joint4,
-          joint5: 0,
-        }, 1.0, () => resolve());
-      });
+      const lifted = await this._tween({
+        joint1: curJoints['joint1'],
+        joint2: PRESETS.arm_uplift.joint2,
+        joint3: PRESETS.arm_uplift.joint3,
+        joint4: PRESETS.arm_uplift.joint4,
+        joint5: 0,
+      }, 1.0);
+      if (!lifted.ok) return lifted;
     }
 
     // 2. 路径规划 (避开工作台占地)
-    const waypoints = this._planChassisPath(x, y);
+    const startX0 = this.robot.root.position.x;
+    const startY0 = this.robot.root.position.y;
+    let waypoints = this._planChassisPath(x, y);
+    // 航点=起点 (A*失败或目标极近): 判断是否仅需近距离对齐
+    if (waypoints.length <= 1 && Math.hypot(waypoints[0].x - startX0, waypoints[0].y - startY0) < 0.01) {
+      const reqDist = Math.hypot(x - startX0, y - startY0);
+      if (reqDist < 0.05) {
+        const safe = this._nearestSafeChassisPoint(x, y) || { x, y };
+        waypoints = [safe];
+        this._log(`[chassis] 近距离对齐 (${(reqDist * 100).toFixed(1)}cm), 直接执行`);
+      } else {
+        this._log('[chassis] 路径规划失败, 底盘未移动');
+        return { ok: false, reason: 'path_not_found', detail: 'A*无法找到安全路径到目标位置' };
+      }
+    }
     if (waypoints.length > 1) {
       this._log(`[chassis] 路径规划: ${waypoints.length}个航点 (绕行工作台)`);
     }
 
-    // 3. 沿航点平滑移动 (每段独立动画)
+    // 3. 沿航点差速移动 (原地转向 → 直行到达, 符合4WD差速运动学)
     const root = this.robot.root;
+    const maxLin = 0.35, maxAng = 1.2, accel = 1.5, angAccel = 4.0;
+    const wheelRadius = 0.038, trackWidth = 0.152;
+    const posTol = 0.012, yawTol = 0.05;
+    const norm = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+
     for (let i = 0; i < waypoints.length; i++) {
       const wp = waypoints[i];
       const isLast = i === waypoints.length - 1;
-      const targetX = wp.x;
-      const targetY = wp.y;
-      const targetYaw = isLast ? yaw : Math.atan2(targetY - root.position.y, targetX - root.position.x);
-      const segDur = duration / waypoints.length;
-      const startX = root.position.x;
-      const startY = root.position.y;
-      const startYaw = root.rotation.z;
-      const t0 = performance.now();
-      const ms = segDur * 1000;
+      this._log(`[chassis] 航点 ${i + 1}/${waypoints.length}: → (${wp.x.toFixed(2)}, ${wp.y.toFixed(2)})`);
+
+      let v = 0, w = 0, prevT = performance.now();
+      const tStart = performance.now();
+      let timeout = false;
+
       await new Promise(resolve => {
         const step = () => {
-          const t = Math.min(1, (performance.now() - t0) / ms);
-          const e = t * t * (3 - 2 * t); // smoothstep
-          root.position.x = startX + (targetX - startX) * e;
-          root.position.y = startY + (targetY - startY) * e;
-          root.rotation.z = startYaw + (targetYaw - startYaw) * e;
-          if (t < 1) requestAnimationFrame(step);
-          else resolve();
+          const now = performance.now();
+          const dt = Math.min((now - prevT) / 1000, 0.05);
+          prevT = now;
+          if (now - tStart > 15000) { timeout = true; resolve(); return; }
+
+          const dx = wp.x - root.position.x;
+          const dy = wp.y - root.position.y;
+          const dist = Math.hypot(dx, dy);
+          const heading = Math.atan2(dy, dx);
+          const yawErr = norm(heading - root.rotation.z);
+          const ay = Math.abs(yawErr);
+
+          let targetV = 0, targetW = 0, arrived = false;
+
+          if (dist > posTol) {
+            const brakeV = Math.sqrt(2 * accel * dist) * 0.9;
+            let vmax = Math.min(maxLin, dist, brakeV);
+            if (dist < 0.12) vmax = Math.min(vmax, dist * 0.5);
+            if (ay > 0.25) {
+              targetW = Math.sign(yawErr) * Math.min(maxAng, ay * 2.5);
+            } else {
+              targetV = vmax;
+              targetW = Math.max(-maxAng, Math.min(maxAng, yawErr * 2.0));
+            }
+          } else if (isLast) {
+            const finalErr = norm(yaw - root.rotation.z);
+            if (Math.abs(finalErr) < yawTol) arrived = true;
+            else targetW = Math.sign(finalErr) * Math.min(maxAng, Math.abs(finalErr) * 2.0);
+          } else {
+            arrived = true;
+          }
+
+          if (arrived) { resolve(); return; }
+
+          const maxDv = accel * dt, maxDw = angAccel * dt;
+          v += Math.max(-maxDv, Math.min(maxDv, targetV - v));
+          w += Math.max(-maxDw, Math.min(maxDw, targetW - w));
+
+          const curYaw = root.rotation.z;
+          root.position.x += v * Math.cos(curYaw) * dt;
+          root.position.y += v * Math.sin(curYaw) * dt;
+          root.rotation.z = norm(curYaw + w * dt);
+
+          const vL = v - w * trackWidth / 2;
+          const vR = v + w * trackWidth / 2;
+          const wL = vL / wheelRadius * dt;
+          const wR = vR / wheelRadius * dt;
+          this.robot.setJoint(WHEEL_JOINT_NAMES[0], this.robot.getJoint(WHEEL_JOINT_NAMES[0]) + wL);
+          this.robot.setJoint(WHEEL_JOINT_NAMES[1], this.robot.getJoint(WHEEL_JOINT_NAMES[1]) + wL);
+          this.robot.setJoint(WHEEL_JOINT_NAMES[2], this.robot.getJoint(WHEEL_JOINT_NAMES[2]) + wR);
+          this.robot.setJoint(WHEEL_JOINT_NAMES[3], this.robot.getJoint(WHEEL_JOINT_NAMES[3]) + wR);
+
+          requestAnimationFrame(step);
         };
         step();
       });
+      if (timeout) { this._log('[chassis] 航点超时, 跳过'); break; }
     }
     return { ok: true };
   }
@@ -767,7 +921,8 @@ export class MockAgent {
       ARM_JOINT_NAMES.forEach(j => liftJoints[j] = this.robot.getJoint(j));
       this.robot.applyJointState(ARM_JOINT_NAMES, ARM_JOINT_NAMES.map(j => cur[j]));
       // 抬升 (短时间)
-      await this._tween(liftJoints, Math.min(0.5, p.d * 0.4));
+      const lifted = await this._tween(liftJoints, Math.min(0.5, p.d * 0.4));
+      if (!lifted.ok) return lifted;
       // 再到目标
       return this._tween(ikJoints, p.d);
     }

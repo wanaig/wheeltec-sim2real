@@ -23,18 +23,21 @@ export const TOOL_CLASS_ID = {
   screwdriver: 0, wrench: 1, nut: 2, roller: 3, screw: 4,
 };
 
+// 工具模型统一缩放因子 (与缩小后的工作台尺寸匹配)
+const TOOL_SCALE = 0.5;
+
 // 工具 3D 包围盒 (X宽 × Y长 × Z高), 供边界框投影计算
 export const TOOL_BBOX = {
-  screwdriver: { x: 0.032, y: 0.113, z: 0.032 },
-  wrench:      { x: 0.024, y: 0.094, z: 0.007 },
-  nut:         { x: 0.028, y: 0.028, z: 0.008 },
-  roller:      { x: 0.036, y: 0.051, z: 0.036 },
-  screw:       { x: 0.014, y: 0.026, z: 0.004 },
+  screwdriver: { x: 0.016, y: 0.0565, z: 0.016 },
+  wrench:      { x: 0.012, y: 0.047, z: 0.0035 },
+  nut:         { x: 0.014, y: 0.014, z: 0.004 },
+  roller:      { x: 0.018, y: 0.0255, z: 0.018 },
+  screw:       { x: 0.007, y: 0.013, z: 0.002 },
 };
 
 // 工具最大半径 (Z方向), 用于放置时防穿模: z = benchTopZ + radius
 export const TOOL_MAX_R = {
-  screwdriver: 0.016, wrench: 0.004, nut: 0.014, roller: 0.018, screw: 0.007,
+  screwdriver: 0.008, wrench: 0.002, nut: 0.007, roller: 0.009, screw: 0.0035,
 };
 
 // ─────────────── 材质 ───────────────
@@ -50,14 +53,17 @@ const MAT = {
 // ─────────────── 工具 3D 模型工厂 ───────────────
 
 export function createToolMesh(cls) {
+  let g;
   switch (cls) {
-    case 'screwdriver': return createScrewdriver();
-    case 'wrench':      return createWrench();
-    case 'nut':         return createNut();
-    case 'roller':      return createRoller();
-    case 'screw':       return createScrew();
-    default: return new THREE.Group();
+    case 'screwdriver': g = createScrewdriver(); break;
+    case 'wrench':      g = createWrench(); break;
+    case 'nut':         g = createNut(); break;
+    case 'roller':      g = createRoller(); break;
+    case 'screw':       g = createScrew(); break;
+    default: g = new THREE.Group();
   }
+  g.scale.setScalar(TOOL_SCALE);
+  return g;
 }
 
 function createScrewdriver() {
@@ -149,16 +155,16 @@ function createScrew() {
  *   左台 (料箱): Y center=-0.30, Y range [-0.49, -0.11], benchD=0.38
  *   过道:        Y range [-0.11, +0.11] (22cm, 机械臂小车通道)
  *   右台 (工具): Y center=+0.30, Y range [+0.11, +0.49], benchD=0.38
- *   两台 X 相同: benchCx=0.30, benchW=0.30 (X range [0.15, 0.45])
+ *   两台 X 相同: benchCx=0.30, benchW=0.15 (X range [0.225, 0.375])
  *
  * 工具全部放在右台 (Y > +0.11)
  */
 
-const BENCH_CX = 0.30, BENCH_W = 0.30, BENCH_D = 0.38;
+const BENCH_CX = 0.30, BENCH_W = 0.15, BENCH_D = 0.38;
 
 // 工具区 (右台) Y/X 范围
 const TOOL_Y_MIN = 0.15, TOOL_Y_MAX = 0.45;
-const TOOL_X_MIN = 0.17, TOOL_X_MAX = 0.43;
+const TOOL_X_MIN = 0.255, TOOL_X_MAX = 0.345;
 
 /**
  * 布局1: 有序摆放 (ordered)
@@ -166,7 +172,7 @@ const TOOL_X_MIN = 0.17, TOOL_X_MAX = 0.43;
  */
 function layoutOrdered(benchTopZ) {
   const tools = [];
-  const startX = 0.18, gapX = 0.035;
+  const startX = 0.26, gapX = 0.02;
   const classes = ['screw', 'nut', 'screwdriver', 'wrench', 'roller'];
   for (let i = 0; i < classes.length; i++) {
     const cls = classes[i];
@@ -210,7 +216,7 @@ function layoutMixed(benchTopZ) {
     const cls = small[i];
     tools.push({
       class: cls,
-      xyz: [0.18, TOOL_Y_MIN + i * 0.08, benchTopZ + TOOL_MAX_R[cls]],
+      xyz: [0.26, TOOL_Y_MIN + i * 0.08, benchTopZ + TOOL_MAX_R[cls]],
       rot: (Math.random() - 0.5) * 0.5,
     });
   }
@@ -218,7 +224,7 @@ function layoutMixed(benchTopZ) {
   const big = ['screwdriver', 'wrench', 'roller'];
   for (let i = 0; i < big.length; i++) {
     const cls = big[i];
-    const x = 0.28 + Math.random() * 0.12;
+    const x = 0.26 + Math.random() * 0.08;
     const y = TOOL_Y_MIN + 0.04 + i * 0.12 + (Math.random() - 0.5) * 0.04;
     const rot = Math.random() * Math.PI * 2;
     tools.push({ class: cls, xyz: [x, y, benchTopZ + TOOL_MAX_R[cls]], rot });
