@@ -18,9 +18,9 @@
  */
 import { MCP_TOOLS } from './MCPTools.js';
 
-// ─────────────── 系统提示词 ───────────────
+// ─────────────── 系统提示词 (供 LangGraphAgent 复用) ───────────────
 
-const SYSTEM_PROMPT = `你是一个工业机械臂小车的自主作业智能体, 控制一台 WHEELTEC R550A 机械臂小车 (5-DOF臂+夹爪, 4WD底盘)。
+export const SYSTEM_PROMPT = `你是一个工业机械臂小车的自主作业智能体, 控制一台 WHEELTEC R550A 机械臂小车 (5-DOF臂+夹爪, 4WD底盘)。
 
 ## 场景描述
 - 双工作台: 左台料箱(3格), 右台工具, 机械臂小车大作业区覆盖两个工作区和中间区域

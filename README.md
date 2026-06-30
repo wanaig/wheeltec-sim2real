@@ -2,7 +2,7 @@
 
 基于 **Vite + Three.js** 构建的 WHEELTEC R550A 6 自由度机械臂(四驱底盘)三维数字孪生系统,直接从 URDF 解析运动学树并加载真实 STL 网格,通过 roslibjs 与真机 ROS 双向通信,实现 sim2real。
 
-在 sim2real 之上,内置一套 **LLM 智能体自主作业系统**:大模型(GPT-4o / DeepSeek / 通义千问 / 智谱 / 本地 Ollama 等 OpenAI 兼容 API)通过 function calling 调用 9 个 MCP 工具(`perceive / move_base / plan_arm_motion / grasp / release / retract / verify / get_robot_state / get_scene_info`),在工业双工作台场景中完成「自然语言指令 → 感知 → 规划 → 抓取 → 放置 → 验证」全流程,含 MoveIt2 风格的多起始 IK + 碰撞检测 + 经由点轨迹规划、A* 底盘路径规划与 4 级失败恢复。无 API Key 时自动回退到正则 NLU 模式。
+ 在 sim2real 之上,内置一套 **LLM 智能体自主作业系统**:基于 **LangGraph** `StateGraph`(`agent ↔ tools` 循环)编排大模型(GPT-4o / DeepSeek / 通义千问 / 智谱 / 本地 Ollama 等 OpenAI 兼容 API)通过 function calling 调用 9 个 MCP 工具(`perceive / move_base / plan_arm_motion / grasp / release / retract / verify / get_robot_state / get_scene_info`),在工业双工作台场景中完成「自然语言指令 → 感知 → 规划 → 抓取 → 放置 → 验证」全流程,含 MoveIt2 风格的多起始 IK + 碰撞检测 + 经由点轨迹规划、A* 底盘路径规划与 4 级失败恢复。无 API Key 时自动回退到正则 NLU 模式。原 `LLMAgent.js`(手写 fetch 循环)保留作 fallback。
 
 **同时支持 ROS1 (Melodic/Noetic) 与 ROS2 (Foxy/Humble/Jazzy)**:UI 左上角「ROS 版本」下拉框切换,前端自动适配消息类型字符串 (`sensor_msgs/JointState` ↔ `sensor_msgs/msg/JointState`) 与时间戳字段 (`secs/nsecs` ↔ `sec/nanosec`)。配套 ROS2 串口桥接包见 [`ros2/`](./ros2),真机部署完整流程见 [`ros2/DEPLOY.md`](./ros2/DEPLOY.md)。
 
@@ -154,10 +154,12 @@ roslaunch wheeltec_arm_pick base_serial.launch
 
 ### 双模式 (自动切换)
 
-- **LLM 模式**(有 API Key):大模型决策 → MCP 工具调用 → MoveIt2 规划 → 执行 → 结果回传 → 继续决策,循环直到完成或达到最大轮数(默认 30 轮)。
+- **LLM 模式**(有 API Key):基于 **LangGraph** `StateGraph` 编排 —— `agent` 节点(ChatOpenAI + 9 工具)生成下一动作 → `tools` 节点(MCPToolExecutor 调度)执行 → 条件边回 `agent` 或 `END`,循环直到完成/熔断/达最大轮数(默认 100)。`tools` 节点内置重复调用检测(近 3 次相同 tool+params 跳过)、连续失败熔断(5 次)、同目标 `plan_arm_motion` 熔断(3 次)、阈值警告注入。
 - **正则模式**(无 API Key):正则 NLU 解析意图(动作/工具/位置/格子)→ 仿真感知 → 规划 → IK 执行 → 失败重试。
 
 在面板填写 `API Base / API Key / Model` 后保存即启用 LLM 模式(配置持久化到 localStorage),可点「验证大模型连接」测试。兼容 OpenAI / DeepSeek / 通义千问 / 智谱 / 本地 Ollama 等所有 OpenAI 格式 API。
+
+> 框架:`LangGraphAgent.js` 用 `@langchain/langgraph` 的 `StateGraph` + `@langchain/openai` 的 `ChatOpenAI` 实现,9 个 MCP 工具以 `DynamicStructuredTool`(Zod schema)注册给模型。`LLMAgent.js`(原生 fetch + 手写 while 循环)保留,在 `main.js` 注释切换即可回退。
 
 ### MCP 工具集 (9 个, OpenAI function calling 格式)
 
@@ -212,7 +214,7 @@ roslaunch wheeltec_arm_pick base_serial.launch
 | 末端位姿 | 实时显示 link5 世界坐标与 RPY |
 | **键盘控制** | **方向键底盘 + 1-5/Q-T 关节 + 6/Y 夹爪 + 0 归零, 仿真/真机共用** |
 | **实时相机** | **双画面, 订阅 CompressedImage / raw Image, 支持 rgb8/bgr8/mono8** |
-| **LLM 智能体** | **OpenAI 兼容 API + 9 个 MCP 工具 + function calling 自主作业** |
+| **LLM 智能体** | **LangGraph StateGraph + OpenAI 兼容 API + 9 个 MCP 工具 + function calling 自主作业** |
 | **MoveIt2 规划仿真** | **多起始 IK + 环境碰撞检测 + 经由点轨迹 + 关节限位** |
 | **工业场景** | **双工作台 + 料箱 + 5 种工具 3D 模型 + 4 种布局** |
 | **A* 底盘导航** | **4WD 差速运动学 + 路径规划避障 + 比例控制制动** |
@@ -234,7 +236,8 @@ wheeltec-sim2real/
 │   ├── ChassisController.js   # ★ 底盘运动学 (4WD 差速 + 键盘 + A* 导航 + odom 覆盖)
 │   ├── ArmKeyboardController.js # ★ 机械臂/夹爪键盘控制 (1-5/Q-T/6/Y/0)
 │   ├── CameraView.js          # 实时相机画面 (CompressedImage/raw Image 解码)
-│   ├── LLMAgent.js            # ★ 大模型智能体 (OpenAI 兼容 API + function calling 循环)
+│   ├── LLMAgent.js            # ★ 原生 fetch + function-calling 循环 (fallback, 导出 SYSTEM_PROMPT)
+│   ├── LangGraphAgent.js      # ★ LangGraph StateGraph 智能体 (agent↔tools 循环, 主用)
 │   ├── MCPTools.js            # ★ MCP 工具集 + 执行器 (9 工具, MoveIt2 规划仿真)
 │   ├── MockAgent.js           # ★ 浏览器内全流程智能体 (LLM/正则双模式 + 工业场景 + A* + 4级恢复)
 │   ├── SceneLayouts.js        # ★ 5 种工具 3D 模型 + 4 种场景布局 + YOLO 标注元数据

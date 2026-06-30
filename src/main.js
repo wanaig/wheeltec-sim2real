@@ -14,7 +14,9 @@ import { AgentPanel } from './AgentPanel.js';
 import { MockAgent } from './MockAgent.js';
 import { DatasetGenerator } from './DatasetGenerator.js';
 import { MCPToolExecutor, MCP_TOOLS } from './MCPTools.js';
-import { LLMAgent } from './LLMAgent.js';
+import { LangGraphAgent } from './LangGraphAgent.js';
+// 原生 fetch + function-calling 实现, 保留作 fallback (注释切换即可):
+// import { LLMAgent } from './LLMAgent.js';
 
 async function main() {
   // 1. 场景
@@ -80,8 +82,9 @@ async function main() {
   });
   mcpExecutor.onLog(msg => agentPanel._onLog(msg));
 
-  // 7.9 LLM 大模型智能体 (OpenAI 兼容 API)
-  const llmAgent = new LLMAgent({
+  // 7.9 LLM 大模型智能体 (基于 LangGraph StateGraph: agent↔tools 循环)
+  // 接口与 LLMAgent 一致, 可直接换回 new LLMAgent({...}) 作原生模式
+  const llmAgent = new LangGraphAgent({
     apiBase: localStorage.getItem('llm_api_base') || 'https://api.openai.com/v1',
     apiKey: localStorage.getItem('llm_api_key') || '',
     model: localStorage.getItem('llm_model') || 'gpt-4o',
