@@ -235,11 +235,11 @@ export class AgentPanel {
         this._llmAgent.apiKey = key;
         this._llmAgent.model = model;
       }
-      const mode = key ? 'LLM 大模型模式' : '正则模式 (无API Key)';
+      const mode = key ? 'LLM 大模型模式' : '未配置 (需API Key)';
       this._pushLog(`[llm] 配置已保存 → ${mode}, model=${model}`);
       const st = this.console.querySelector('#ac-status');
       if (st && this._mockAgent) {
-        st.textContent = key ? 'LLM 模式 · 大模型+MCP' : 'Mock 模式 · 正则NLU';
+        st.textContent = key ? 'LLM 模式 · 大模型+MCP' : '未配置 API Key';
       }
     };
     llmRow.appendChild(btnSaveLLM);
@@ -398,12 +398,12 @@ export class AgentPanel {
     this._syncSubscriptions();
   }
 
-  /** 设置 Mock 模式 (无需 ROS2, 浏览器内跑全流程) */
+  /** 设置仿真智能体 (浏览器内跑全流程) */
   setMockAgent(agent) {
     this._mockAgent = agent;
     const el = this.console.querySelector('#ac-status');
-    el.textContent = 'Mock 模式 · 浏览器仿真';
-    el.className = 'ac-status ok';
+    el.textContent = '待配置 API Key';
+    el.className = 'ac-status';
     // 快捷按钮直接可用 (不依赖 ROS 连接)
   }
 

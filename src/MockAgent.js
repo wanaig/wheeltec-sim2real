@@ -1,16 +1,14 @@
 /**
- * MockAgent.js — 浏览器内全流程智能体
+ * MockAgent.js — 浏览器内仿真智能体 (LLM 模式)
  *
- * 双模式:
- *   A) LLM 模式 (有大模型 API Key): 大模型决策 → MCP工具调用 → MoveIt2规划 → 执行
- *   B) 正则模式 (无 API Key): 正则NLU → 仿真感知 → 规划 → IK执行 → 失败重试
- *
- * LLM 模式下, MockAgent 作为 MCPToolExecutor 的后端, 提供:
- *   _perceive / _moveChassisTo / _moveToPose / _graspNearest / _release / _verifyGrasp / _verifyPlace
+ * MockAgent 作为 MCPToolExecutor 的物理后端, 提供:
+ *   _perceive / _moveChassisTo / _moveToPose / _graspNearest / _release
+ * 场景管理: resetScene / setLayout / applyLayout
  *
  * 用法 (main.js):
  *   const mockAgent = new MockAgent(robot, ik, scene, agentPanel);
  *   agentPanel.setMockAgent(mockAgent);
+ *   mockAgent.setLLMAgent(llmAgent);
  *   // 渲染循环里: mockAgent.update();
  */
 import * as THREE from 'three';
@@ -32,50 +30,6 @@ const BIN_SLOTS = {
   3: [0.30, -0.42, 0.073],
 };
 
-const CN_NUM = { '一':1,'二':2,'三':3,'四':4,'五':5,'六':6,
-                  '1':1,'2':2,'3':3,'4':4,'5':5,'6':6 };
-
-const TOOL_PAT = {
-  screwdriver: [/螺丝刀/, /改锥/, /起子/],
-  wrench: [/扳手/, /扳子/],
-  nut: [/螺母/, /螺帽/],
-  roller: [/滚柱/, /滚子/],
-  screw: [/螺丝/, /螺钉/],
-};
-const POS_PAT = {
-  left: [/左(?:侧|边)/],
-  right: [/右(?:侧|边)/],
-  center: [/中(?:间|央|部)/],
-};
-
-// ─────────────── 正则 NLU ───────────────
-function parseInstruction(text) {
-  let action = 'unknown';
-  if (/放/.test(text)) action = 'pick_and_place';
-  else if (/给|递/.test(text)) action = 'fetch';
-  else if (/抓取|抓起|取/.test(text)) action = 'pick';
-
-  let tool = null;
-  for (const [t, pats] of Object.entries(TOOL_PAT)) {
-    if (pats.some(p => p.test(text))) { tool = t; break; }
-  }
-  let pos = null;
-  for (const [p, pats] of Object.entries(POS_PAT)) {
-    if (pats.some(p => p.test(text))) { pos = p; break; }
-  }
-  let slot = null;
-  const m = text.match(/第\s*([一二三四五六123456])\s*(?:格|个格子|个位置|个)/);
-  if (m) slot = CN_NUM[m[1]];
-
-  const intent = {
-    action, target: { tool, position_hint: pos },
-    destination: { type: null },
-  };
-  if (action === 'pick_and_place') intent.destination = { type: 'bin', slot };
-  else if (action === 'fetch') intent.destination = { type: 'user' };
-  return intent;
-}
-
 // ─────────────── MockAgent ───────────────
 export class MockAgent {
   constructor(robot, ik, sceneSetup, panel) {
@@ -88,12 +42,6 @@ export class MockAgent {
     this._benchTopZ = 0.060;     // 台面顶高度 (供 DatasetGenerator 引用)
     this._binSlots = BIN_SLOTS;  // 料箱格子坐标 (供 MCPToolExecutor 引用)
 
-    // 关闭碰撞检测 (仿真不需要, 避免 IK 被拒绝)
-    this.robot.collisionEnabled = false;
-
-    // 当前布局名
-    this._currentLayout = DEFAULT_LAYOUT;
-
     // 工具状态 (含 3D mesh), 初始用默认布局
     const toolDefs = generateLayout(DEFAULT_LAYOUT, this._benchTopZ);
     this.tools = toolDefs.map(t => ({
@@ -105,10 +53,15 @@ export class MockAgent {
     // 工具对象 (切换布局时清除重建)
     this._toolObjects = [];
 
-    this._target = null;
-    this._slotXyz = null;
     this._lastAboveJoints = null;   // 最近一次竖直下降起点(目标正上方)关节角, 供 retract 逆序抬升
     this._lastAboveGripper = null;  // 下降段夹爪状态 (retract 逆序需用同状态, 否则张开/闭合连杆位姿不同可能碰撞)
+
+    // 关闭碰撞检测 (仿真不需要, 避免 IK 被拒绝)
+    this.robot.collisionEnabled = false;
+
+    // 当前布局名
+    this._currentLayout = DEFAULT_LAYOUT;
+
     this._buildScene3D();
     this._buildTools();
 
@@ -380,20 +333,6 @@ export class MockAgent {
         conf: 0.9,
       }));
   }
-
-  _selectTarget(objs, intent) {
-    const tool = intent.target.tool;
-    const hint = intent.target.position_hint;
-    const cands = objs.filter(o => o.class === tool);
-    if (cands.length === 0) return null;
-    // Y负 = 视觉左, Y正 = 视觉右 (相机在+X-Y方向看向原点)
-    if (hint === 'left') return cands.reduce((a, b) => a.xyz[1] < b.xyz[1] ? a : b);
-    if (hint === 'right') return cands.reduce((a, b) => a.xyz[1] > b.xyz[1] ? a : b);
-    if (hint === 'center') return cands.reduce((a, b) => Math.abs(a.xyz[1]) < Math.abs(b.xyz[1]) ? a : b);
-    return cands[0];
-  }
-
-  // ─── 规划 ───
 
   // 工作台占地范围 (底盘不能进入)
   static BENCH_FOOTPRINTS = [
@@ -721,82 +660,6 @@ export class MockAgent {
     return out;
   }
 
-  _buildPlan(action, targetXyz, slotXyz) {
-    const aH = 0.08;
-    const preZ = targetXyz[2] + aH;
-
-    // 辅助: 检查从当前底盘位置能否到达目标
-    const reachable = (xyz) => {
-      const armBase = new THREE.Vector3();
-      this.robot.jointGroups['joint1'].getWorldPosition(armBase);
-      const armX = armBase.x;
-      const armY = armBase.y;
-      const armZ = armBase.z;
-      const d = Math.hypot(xyz[0] - armX, xyz[1] - armY, xyz[2] - armZ);
-      return d <= MockAgent.ARM_REACH;
-    };
-
-    if (action === 'pick_and_place') {
-      const sPreZ = slotXyz[2] + aH;
-      const plan = [
-        { n: 'go_preset', p: { name: 'arm_uplift', d: 1.0 } },  // 先抬到安全高度
-      ];
-      // 目标不可达 → 底盘移到过道站位 (不进入工作台)
-      if (!reachable(targetXyz)) {
-        const [gx, gy, gyaw] = this._chassisGoalFor(targetXyz);
-        plan.push({ n: 'move_base_to', p: { x: gx, y: gy, yaw: gyaw, d: 2.0 } });
-      }
-      // 抓取: 先到上方预抓取点, 再下扎 (避免水平穿模)
-      plan.push(
-        { n: 'move_to_pose', p: { x: targetXyz[0], y: targetXyz[1], z: preZ, d: 1.2 } },
-        { n: 'open_gripper', p: { d: 0.4 } },
-        { n: 'move_to_pose', p: { x: targetXyz[0], y: targetXyz[1], z: targetXyz[2], d: 0.7 } },
-        { n: 'close_gripper', p: { d: 0.6 } },
-        { n: 'retract', p: { lift: 0.10, d: 0.7 } },
-        { n: 'go_preset', p: { name: 'arm_uplift', d: 0.8 } },  // 抬到安全高度再移动
-      );
-      // 料箱不可达 → 底盘移到料箱侧过道站位
-      if (!reachable(slotXyz)) {
-        const [sx, sy, syaw] = this._chassisGoalFor(slotXyz);
-        plan.push({ n: 'move_base_to', p: { x: sx, y: sy, yaw: syaw, d: 2.0 } });
-      }
-      // 放置
-      plan.push(
-        { n: 'move_to_pose', p: { x: slotXyz[0], y: slotXyz[1], z: sPreZ, d: 1.2 } },
-        { n: 'move_to_pose', p: { x: slotXyz[0], y: slotXyz[1], z: slotXyz[2], d: 0.7 } },
-        { n: 'open_gripper', p: { d: 0.4 } },
-        { n: 'retract', p: { lift: 0.10, d: 0.7 } },
-        { n: 'verify_place', p: {} },
-        { n: 'go_preset', p: { name: 'arm_uplift', d: 1.0 } },  // 收回至安全抬起姿态 (避免折叠归位时连杆扫过料箱壁)
-      );
-      return plan;
-    }
-    if (action === 'fetch') {
-      return [
-        { n: 'go_preset',    p: { name: 'arm_uplift', d: 1.0 } },
-        { n: 'move_to_pose', p: { x: targetXyz[0], y: targetXyz[1], z: preZ, d: 1.2 } },
-        { n: 'open_gripper', p: { d: 0.4 } },
-        { n: 'move_to_pose', p: { x: targetXyz[0], y: targetXyz[1], z: targetXyz[2], d: 0.7 } },
-        { n: 'close_gripper',p: { d: 0.6 } },
-        { n: 'verify_grasp', p: {} },
-        { n: 'retract',      p: { lift: 0.12, d: 0.7 } },
-        { n: 'go_preset',    p: { name: 'arm_rotate_uplift', d: 1.0 } },
-      ];
-    }
-    if (action === 'pick') {
-      return [
-        { n: 'go_preset',    p: { name: 'arm_uplift', d: 0.8 } },
-        { n: 'open_gripper', p: { d: 0.4 } },
-        { n: 'move_to_pose', p: { x: targetXyz[0], y: targetXyz[1], z: preZ, d: 1.0 } },
-        { n: 'move_to_pose', p: { x: targetXyz[0], y: targetXyz[1], z: targetXyz[2], d: 0.7 } },
-        { n: 'close_gripper',p: { d: 0.6 } },
-        { n: 'verify_grasp', p: {} },
-        { n: 'retract',      p: { lift: 0.10, d: 0.7 } },
-      ];
-    }
-    return [];
-  }
-
   // ─── 执行 ───
   async _tween(target, duration) {
     const hit = this._checkArmTrajectoryCollision(target);
@@ -1041,27 +904,6 @@ export class MockAgent {
     return false;
   }
 
-  _verifyGrasp() {
-    const cls = this._target?.class;
-    const orig = this._target?.xyz;
-    if (!cls || !orig) return { ok: true };
-    const objs = this._perceive();
-    const stillThere = objs.some(o =>
-      o.class === cls &&
-      Math.hypot(o.xyz[0]-orig[0], o.xyz[1]-orig[1], o.xyz[2]-orig[2]) < 0.04);
-    return { ok: !stillThere, reason: stillThere ? 'object_still_on_table' : 'object_lifted' };
-  }
-
-  _verifyPlace() {
-    const cls = this._target?.class;
-    if (!cls || !this._slotXyz) return { ok: true };
-    const objs = this._perceive();
-    const placed = objs.some(o =>
-      o.class === cls &&
-      Math.hypot(o.xyz[0]-this._slotXyz[0], o.xyz[1]-this._slotXyz[1]) < 0.06);
-    return { ok: placed, reason: placed ? 'object_in_slot' : 'object_not_in_slot' };
-  }
-
   // ── retract (收回机械臂: 垂直抬升 + 安全收臂, 从上往下抓取/放置的逆操作) ──
   // 多策略抬升, 避免料箱壁/工作台穿模 (与 MCPTools._retract 一致):
   //   1a) 逆序抬升: 复用 _moveToPose 下降段记录的"目标正上方"关节角 (下降已过碰撞检测 ⇒ 逆序必然无碰撞)
@@ -1200,37 +1042,6 @@ export class MockAgent {
     return { ok: true };
   }
 
-  async _executeSkill(skill) {
-    switch (skill.n) {
-      case 'go_preset':
-        return this._tween({ ...PRESETS[skill.p.name] }, skill.p.d);
-      case 'move_base_to':
-        this._log(`[chassis] 导航至 (${skill.p.x.toFixed(2)}, ${skill.p.y.toFixed(2)})`);
-        return this._moveChassisTo(skill.p.x, skill.p.y, skill.p.yaw || 0, skill.p.d || 2.0);
-      case 'move_to_pose':
-        return this._moveToPose(skill.p);
-      case 'open_gripper':
-        await this._tween({ ...GRIPPER_POSES.open }, skill.p.d);
-        this._release();
-        return { ok: true };
-      case 'close_gripper':
-        await this._tween({ ...GRIPPER_POSES.close }, skill.p.d);
-        this._graspNearest();
-        return { ok: true };
-      case 'retract': {
-        return this._retract(skill.p);
-      }
-      case 'verify_grasp':
-        await this._delay(200);
-        return this._verifyGrasp();
-      case 'verify_place':
-        await this._delay(200);
-        return this._verifyPlace();
-      default:
-        return { ok: false };
-    }
-  }
-
   // ─── 面板回调 ───
   _log(line) {
     if (this.panel) this.panel._onLog(line);
@@ -1241,7 +1052,7 @@ export class MockAgent {
     }
   }
 
-  // ─── 主入口 (自动选择 LLM 模式 / 正则模式) ───
+  // ─── 主入口 (LLM 模式) ───
   async run(instruction) {
     if (this._busy) return;
     this._busy = true;
@@ -1249,21 +1060,12 @@ export class MockAgent {
     this._log(`>>> 指令: ${instruction}`);
     this._setStatus('running', instruction);
 
-    // LLM 模式: 有 API Key + executor 时走大模型决策
-    if (this._llmAgent && this._llmAgent.apiKey) {
-      await this._runWithLLM(instruction);
+    if (!this._llmAgent || !this._llmAgent.apiKey) {
+      this._log('<<< 结果: failed — 未配置 API Key, 请在面板中设置');
+      this._setStatus('failed', '未配置 API Key');
+      this._busy = false;
       return;
     }
-
-    // 正则模式: 回退到规则化 NLU + 规划
-    await this._runWithRegex(instruction);
-  }
-
-  /** 设置 LLM 智能体 (由 main.js 注入) */
-  setLLMAgent(llmAgent) { this._llmAgent = llmAgent; }
-
-  // ─── LLM 模式: 大模型决策 + MCP 工具调用 ───
-  async _runWithLLM(instruction) {
     this._log('[LLM] 启动大模型决策模式');
     try {
       const result = await this._llmAgent.run(instruction);
@@ -1275,106 +1077,12 @@ export class MockAgent {
         this._setStatus('failed', result.summary);
       }
     } catch (e) {
-      this._log(`[LLM] 异常: ${e.message}, 回退正则模式`);
-      await this._runWithRegex(instruction);
+      this._log(`[LLM] 异常: ${e.message}`);
+      this._setStatus('failed', e.message);
     }
     this._busy = false;
   }
 
-  // ─── 正则模式 (回退) ───
-  async _runWithRegex(instruction) {
-    // 1. NLU (正则解析)
-    const intent = parseInstruction(instruction);
-    this._log(`[nlu] 意图=${intent.action} tool=${intent.target.tool} hint=${intent.target.position_hint} slot=${intent.destination?.slot}`);
-    await this._delay(300);
-
-    // 2. 感知
-    const objs = this._perceive();
-    this._log(`[perceive] ${objs.length} 物体: ${objs.map(o => o.class).join(', ')}`);
-    await this._delay(300);
-
-    // 3. 选目标 + 规划
-    const target = this._selectTarget(objs, intent);
-    if (!target) {
-      this._log('[plan] 未找到目标工具');
-      this._setStatus('failed', instruction);
-      this._busy = false;
-      return;
-    }
-    this._target = { class: target.class, xyz: [...target.xyz] };
-    const slot = intent.destination?.slot;
-    this._slotXyz = slot ? BIN_SLOTS[slot] : null;
-    const plan = this._buildPlan(intent.action, target.xyz, this._slotXyz);
-    this._log(`[plan] ${plan.length} 步, 目标=${target.class}@[${target.xyz.map(v=>v.toFixed(2))}]`);
-    await this._delay(300);
-
-    // 4. 执行 + 验证 + 重试 (4级恢复策略)
-    let retryCount = 0;
-    const maxRetries = 2;       // 本地重试 (换目标/偏移/换格子)
-    const maxChassisRetries = 2; // 底盘移动重试 (超限后触发)
-    const hardLimit = maxRetries + maxChassisRetries;
-
-    while (retryCount <= hardLimit) {
-      let failed = false;
-      let failSkill = '';
-      for (let i = 0; i < plan.length; i++) {
-        const skill = plan[i];
-        const r = await this._executeSkill(skill);
-        this._log(`[exec ${i}] ${skill.n} → ok=${r.ok}`);
-        if (!r.ok) {
-          if (skill.n === 'verify_grasp' || skill.n === 'verify_place' ||
-              skill.n === 'move_to_pose' || skill.n === 'retract') {
-            failed = true;
-            failSkill = skill.n;
-            break;
-          }
-          // go_preset 失败: 臂未到预设位, 但任务核心步骤已完成, 记录但不中断
-          this._log(`[exec] ${skill.n} 失败, 已跳过 (${r.detail || r.reason || ''})`);
-        }
-      }
-      if (!failed) {
-        this._log(`<<< 结果: done`);
-        this._setStatus('done', instruction);
-        this._busy = false;
-        return;
-      }
-      retryCount++;
-      if (retryCount > hardLimit) {
-        this._log(`[replan] 重试+底盘移动均超限 → 失败`);
-        this._log(`<<< 结果: failed`);
-        this._setStatus('failed', instruction);
-        this._busy = false;
-        return;
-      }
-
-      // ── 1~2次: 本地重试 (换目标) ──
-      if (retryCount <= maxRetries) {
-        this._log(`[replan] 第${retryCount}次重试, 重新感知`);
-        const newObjs = this._perceive();
-        const newTarget = this._selectTarget(newObjs, intent);
-        if (newTarget) {
-          this._target = { class: newTarget.class, xyz: [...newTarget.xyz] };
-          const newPlan = this._buildPlan(intent.action, newTarget.xyz, this._slotXyz);
-          plan.length = 0;
-          plan.push(...newPlan);
-        }
-        await this._delay(500);
-      }
-      // ── 3~4次: 底盘移动 + 重规划 (新 _buildPlan 自动插入 move_base_to) ──
-      else {
-        const chassisRound = retryCount - maxRetries;
-        this._log(`[replan] 本地重试超限 → 第${chassisRound}次底盘移动+重规划`);
-        // 重新感知
-        const newObjs = this._perceive();
-        const newTarget = this._selectTarget(newObjs, intent) || this._target;
-        this._target = { class: newTarget.class, xyz: [...newTarget.xyz] };
-        // 重建计划 (_buildPlan 自动检测不可达 → 插入 move_base_to 到目标旁和料箱旁)
-        const newPlan = this._buildPlan(intent.action, newTarget.xyz, this._slotXyz);
-        plan.length = 0;
-        plan.push(...newPlan);
-        await this._delay(500);
-      }
-    }
-    this._busy = false;
-  }
+  /** 设置 LLM 智能体 (由 main.js 注入) */
+  setLLMAgent(llmAgent) { this._llmAgent = llmAgent; }
 }

@@ -310,6 +310,39 @@ export class MCPToolExecutor {
   onLog(cb) { this._logCb = cb; }
   _log(msg) { if (this._logCb) this._logCb(msg); }
 
+  /** 获取当前夹持的工具 (null=未持物) */
+  _getHeldObject() {
+    if (!this.agent?.tools) return null;
+    const held = this.agent.tools.find(t => t.grasped);
+    return held ? { class: held.class, xyz: [...held.currentXyz] } : null;
+  }
+
+  /** 获取各料箱格子中的物体列表 (用于进度跟踪) */
+  _getBinOccupancy() {
+    const result = {};
+    for (const [slotNum, slotXyz] of Object.entries(this.binSlots)) {
+      const objects = [];
+      if (this.agent?.tools) {
+        for (const t of this.agent.tools) {
+          if (t.grasped) continue;
+          const d = Math.hypot(t.currentXyz[0] - slotXyz[0], t.currentXyz[1] - slotXyz[1]);
+          if (d < 0.06) objects.push(t.class);
+        }
+      }
+      result[slotNum] = objects;
+    }
+    return result;
+  }
+
+  /** 给工具结果追加机器人状态 (夹爪/持物), 让 LLM 每轮都能看到当前状态 */
+  _enrichState(r) {
+    if (r.gripper !== undefined) return r; // get_robot_state 已自带, 不覆盖
+    const held = this._getHeldObject();
+    r.gripper = held ? 'closed' : 'open';
+    r.holding = held ? held.class : null;
+    return r;
+  }
+
   _suggestChassisFor(target) {
     const cur = this.robot.root.position;
     const curYaw = this.robot.root.rotation.z;
@@ -485,7 +518,8 @@ export class MCPToolExecutor {
     this._log(`[MCP] 调用工具: ${name}(${JSON.stringify(params)})`);
     try {
       const r = await this._dispatch(name, params);
-      this._log(`[MCP] ${name} → ${r.ok ? 'ok' : 'fail'}${r.reason ? ': ' + r.reason : ''}`);
+      this._enrichState(r);  // 每个工具结果都带夹爪/持物状态, 防止 LLM 状态混淆
+      this._log(`[MCP] ${name} → ${r.ok ? 'ok' : 'fail'}${r.reason ? ': ' + r.reason : ''}${r.holding ? ' (holding:' + r.holding + ')' : ''}`);
       return r;
     } catch (e) {
       this._log(`[MCP] ${name} 异常: ${e.message}`);
@@ -516,6 +550,7 @@ export class MCPToolExecutor {
     const armX = armBase.x;
     const armY = armBase.y;
     const armZ = armBase.z;
+    const held = this._getHeldObject();
     return {
       ok: true,
       objects: objs.map(o => {
@@ -536,6 +571,9 @@ export class MCPToolExecutor {
       count: objs.length,
       arm_base: { x: +armX.toFixed(3), y: +armY.toFixed(3), z: +armZ.toFixed(3) },
       arm_reach_m: 0.40,
+      gripper: held ? 'closed' : 'open',
+      holding: held ? held.class : null,
+      bin_occupancy: this._getBinOccupancy(),
     };
   }
 
@@ -810,17 +848,36 @@ export class MCPToolExecutor {
       this.robot.tweenTo({ ...GRIPPER_POSES.close }, 0.8, () => resolve());
     });
     const ok = this.agent._graspNearest();
-    return { ok, reason: ok ? 'grasped' : 'no_object_in_range' };
+    const held = this._getHeldObject();
+    return {
+      ok,
+      reason: ok ? 'grasped' : 'no_object_in_range',
+      grasped_object: held ? held.class : null,
+      hint: ok ? null : '夹爪3.5cm内无可抓取物体。调用 perceive 确认目标坐标, 或 move_base 更换站位靠近目标。',
+    };
   }
 
   // ── release ──
   async _release() {
+    const heldBefore = this._getHeldObject();
     await new Promise(resolve => {
       this.robot.tweenTo({ ...GRIPPER_POSES.open }, 0.6, () => resolve());
     });
     this.agent._release();
     const tcp = this.robot.getGripperTCP();
-    return { ok: true, released_at: { x: +tcp.x.toFixed(3), y: +tcp.y.toFixed(3), z: +tcp.z.toFixed(3) } };
+    // 检查是否落入某个料箱格子
+    let landedSlot = null;
+    for (const [slotNum, slotXyz] of Object.entries(this.binSlots)) {
+      const d = Math.hypot(tcp.x - slotXyz[0], tcp.y - slotXyz[1]);
+      if (d < 0.06) { landedSlot = +slotNum; break; }
+    }
+    return {
+      ok: true,
+      released_object: heldBefore ? heldBefore.class : null,
+      released_at: { x: +tcp.x.toFixed(3), y: +tcp.y.toFixed(3), z: +tcp.z.toFixed(3) },
+      landed_in_slot: landedSlot,
+      bin_occupancy: this._getBinOccupancy(),
+    };
   }
 
   // ── retract (收回机械臂: 垂直抬升 + 安全收臂, 从上往下抓取/放置的逆操作) ──
@@ -942,17 +999,37 @@ export class MCPToolExecutor {
     };
   }
 
-  // ── verify ──
+  // ── verify (直接检查场景状态, 不依赖 MockAgent._target/_slotXyz) ──
   _verify(p) {
     if (p.type === 'grasp') {
-      const r = this.agent._verifyGrasp();
-      return r;
+      const held = this._getHeldObject();
+      return {
+        ok: !!held,
+        reason: held ? `grasped: ${held.class}` : 'no_object_grasped',
+        held_object: held ? held.class : null,
+      };
     }
     if (p.type === 'place') {
-      const r = this.agent._verifyPlace();
-      return r;
+      const slotNum = p.slot;
+      const slotXyz = this.binSlots[slotNum] || this.binSlots[String(slotNum)];
+      if (!slotXyz) return { ok: false, reason: 'invalid_slot', detail: `料箱${slotNum}不存在` };
+      const objects = [];
+      if (this.agent?.tools) {
+        for (const t of this.agent.tools) {
+          if (t.grasped) continue; // 跳过正在夹持的
+          const d = Math.hypot(t.currentXyz[0] - slotXyz[0], t.currentXyz[1] - slotXyz[1]);
+          if (d < 0.06) objects.push(t.class);
+        }
+      }
+      return {
+        ok: objects.length > 0,
+        reason: objects.length > 0 ? 'objects_in_slot' : 'slot_empty',
+        slot: slotNum,
+        objects_in_slot: objects,
+        count: objects.length,
+      };
     }
-    return { ok: false, reason: 'unknown_verify_type' };
+    return { ok: false, reason: 'unknown_verify_type', detail: `type必须是grasp或place` };
   }
 
   // ── get_robot_state ──
@@ -962,12 +1039,14 @@ export class MCPToolExecutor {
     ARM_JOINT_NAMES.forEach(j => joints[j] = +this.robot.getJoint(j).toFixed(3));
     const tcp = this.robot.getGripperTCP();
     const joint6 = this.robot.getJoint('joint6');
+    const held = this._getHeldObject();
     return {
       ok: true,
       chassis: { x: +pos.x.toFixed(3), y: +pos.y.toFixed(3), yaw: +this.robot.root.rotation.z.toFixed(3) },
       arm_joints: joints,
       gripper: joint6 > 0 ? 'open' : 'closed',
       gripper_value: +joint6.toFixed(3),
+      holding: held ? held.class : null,
       tcp: { x: +tcp.x.toFixed(3), y: +tcp.y.toFixed(3), z: +tcp.z.toFixed(3) },
     };
   }
@@ -992,6 +1071,7 @@ export class MCPToolExecutor {
       ),
       bench_top_z: 0.060,
       safe_height_z: 0.14,
+      bin_occupancy: this._getBinOccupancy(),
       planning_note: '底盘站位按最近可达点规划, 并按底盘半径+安全间隙避开工作台; 臂移动时不能穿入工作台碰撞盒, 必要时经安全高度绕行。',
     };
   }

@@ -67,7 +67,7 @@ async function main() {
   // 暴露给 UIController 版本切换时调用重建 (若 UIController 有 version 切换钩子)
   ros._agentPanel = agentPanel;
 
-  // 7.6 Mock 模式智能体 (双模式: LLM大模型 / 正则NLU)
+  // 7.6 仿真智能体 (LLM 大模型 + MCP 工具调用)
   const mockAgent = new MockAgent(robot, ik, scene, agentPanel);
   agentPanel.setMockAgent(mockAgent);
 
