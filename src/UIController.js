@@ -330,8 +330,11 @@ export class UIController {
       btn.addEventListener('click', () => {
         const name = btn.dataset.preset;
         const pose = PRESETS[name];
-        // 平滑过渡到预设位姿 (动画), 同时发布到真机
-        this._animateToPose(pose, 1.2);
+        // 归零位时同时张开夹爪, 其他预设只动臂
+        const fullPose = name === 'arm_home'
+          ? { ...pose, ...GRIPPER_POSES.open }
+          : pose;
+        this._animateToPose(fullPose, 1.2);
       });
     });
   }
