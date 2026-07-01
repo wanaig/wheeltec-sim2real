@@ -536,6 +536,10 @@ export class MCPToolExecutor {
       const r = await this._dispatch(name, params);
       this._enrichState(r);  // 每个工具结果都带夹爪/持物状态, 防止 LLM 状态混淆
       this._log(`[MCP] ${name} → ${r.ok ? 'ok' : 'fail'}${r.reason ? ': ' + r.reason : ''}${r.holding ? ' (holding:' + r.holding + ')' : ''}`);
+      // perceive 成功时回调通知面板 (供 UI 更新物体检测)
+      if (name === 'perceive' && r.ok && this.onToolResult) {
+        try { this.onToolResult(name, r); } catch (e) { /* 忽略回调异常 */ }
+      }
       return r;
     } catch (e) {
       this._log(`[MCP] ${name} 异常: ${e.message}`);

@@ -147,16 +147,14 @@ export class AgentPanel {
     });
     // 工控按钮: 重置 + 模拟失败
     const ctrlRow = document.createElement('div');
-    ctrlRow.style.cssText = 'display:flex;gap:4px;margin-top:4px';
+    ctrlRow.className = 'ac-ctrl-row';
     const btnReset = document.createElement('button');
-    btnReset.className = 'ac-quick-btn';
-    btnReset.style.cssText = 'background:#333;color=#0F0;border-color:#080';
+    btnReset.className = 'ac-quick-btn ctrl';
     btnReset.textContent = '重置场景';
     btnReset.onclick = () => { if (this._mockAgent) this._mockAgent.resetScene(); };
     ctrlRow.appendChild(btnReset);
     const btnFail = document.createElement('button');
-    btnFail.className = 'ac-quick-btn';
-    btnFail.style.cssText = 'background:#330;color:#FF0;border-color:#440';
+    btnFail.className = 'ac-quick-btn fail';
     btnFail.textContent = '模拟放置失败';
     btnFail.onclick = () => {
       if (this._mockAgent) {
@@ -169,23 +167,22 @@ export class AgentPanel {
 
     // 场景布局切换 + 数据集生成
     const sceneRow = document.createElement('div');
-    sceneRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-top:4px;border-top:1px solid #333;padding-top:4px';
+    sceneRow.className = 'ac-scene-row';
     const sceneLbl = document.createElement('span');
-    sceneLbl.style.cssText = 'color:#888;font-size:11px;width:100%';
+    sceneLbl.className = 'ac-llm-label';
     sceneLbl.textContent = '场景布局 / 数据集';
     sceneRow.appendChild(sceneLbl);
     for (const name of LAYOUT_NAMES) {
       const b = document.createElement('button');
-      b.className = 'ac-quick-btn';
-      b.style.cssText = 'background:#224;font-size:11px;padding:2px 6px';
+      b.className = 'ac-quick-btn scene';
       b.textContent = LAYOUT_CN[name];
       b.onclick = () => { if (this._mockAgent) this._mockAgent.setLayout(name); };
       sceneRow.appendChild(b);
     }
     // 数据集生成按钮
     const btnGen = document.createElement('button');
-    btnGen.className = 'ac-quick-btn';
-    btnGen.style.cssText = 'background:#422;color=#FC0;border-color:#640;font-size:11px;padding:2px 6px;width:100%;margin-top:2px';
+    btnGen.id = 'ac-gen-dataset';
+    btnGen.className = 'ac-quick-btn gen';
     btnGen.textContent = '生成数据集 (图像+YOLO标注)';
     btnGen.onclick = () => this._generateDataset();
     sceneRow.appendChild(btnGen);
@@ -193,36 +190,35 @@ export class AgentPanel {
 
     // LLM 大模型配置区
     const llmRow = document.createElement('div');
-    llmRow.style.cssText = 'border-top:1px solid #333;padding-top:4px;margin-top:4px';
+    llmRow.className = 'ac-llm-config';
     const llmLbl = document.createElement('span');
-    llmLbl.style.cssText = 'color:#888;font-size:11px;width:100%;display:block';
+    llmLbl.className = 'ac-llm-label';
     llmLbl.textContent = '大模型 + MCP 工具调用';
     llmRow.appendChild(llmLbl);
     // API Base
     const inpBase = document.createElement('input');
     inpBase.type = 'text';
+    inpBase.className = 'ac-llm-input';
     inpBase.placeholder = 'API Base (如 https://api.openai.com/v1)';
-    inpBase.style.cssText = 'width:100%;background:#111;color:#0F0;border:1px solid #333;font-size:10px;padding:2px 4px;margin-bottom:2px';
     inpBase.value = localStorage.getItem('llm_api_base') || 'https://api.openai.com/v1';
     llmRow.appendChild(inpBase);
     // API Key
     const inpKey = document.createElement('input');
     inpKey.type = 'password';
+    inpKey.className = 'ac-llm-input';
     inpKey.placeholder = 'API Key';
-    inpKey.style.cssText = 'width:100%;background:#111;color:#0F0;border:1px solid #333;font-size:10px;padding:2px 4px;margin-bottom:2px';
     inpKey.value = localStorage.getItem('llm_api_key') || '';
     llmRow.appendChild(inpKey);
     // Model
     const inpModel = document.createElement('input');
     inpModel.type = 'text';
+    inpModel.className = 'ac-llm-input';
     inpModel.placeholder = 'Model (如 gpt-4o)';
-    inpModel.style.cssText = 'width:100%;background:#111;color:#0F0;border:1px solid #333;font-size:10px;padding:2px 4px;margin-bottom:2px';
     inpModel.value = localStorage.getItem('llm_model') || 'gpt-4o';
     llmRow.appendChild(inpModel);
     // 保存按钮
     const btnSaveLLM = document.createElement('button');
-    btnSaveLLM.className = 'ac-quick-btn';
-    btnSaveLLM.style.cssText = 'background:#224;color:#8CF;border-color:#246;font-size:10px;padding:2px 6px;width:100%';
+    btnSaveLLM.className = 'ac-llm-btn save';
     btnSaveLLM.textContent = '保存并启用 LLM 模式';
     btnSaveLLM.onclick = () => {
       const base = inpBase.value.trim();
@@ -238,17 +234,13 @@ export class AgentPanel {
       }
       const mode = key ? 'LLM 大模型模式' : '未配置 (需API Key)';
       this._pushLog(`[llm] 配置已保存 → ${mode}, model=${model}`);
-      const st = this.console.querySelector('#ac-status');
-      if (st && this._mockAgent) {
-        st.textContent = key ? 'LLM 模式 · 大模型+MCP' : '未配置 API Key';
-      }
+      this._refreshLLMStatus();
     };
     llmRow.appendChild(btnSaveLLM);
 
     // 验证连接按钮
     const btnTestLLM = document.createElement('button');
-    btnTestLLM.className = 'ac-quick-btn';
-    btnTestLLM.style.cssText = 'background:#242;color:#FC0;border-color:#462;font-size:10px;padding:2px 6px;width:100%;margin-top:2px';
+    btnTestLLM.className = 'ac-llm-btn test';
     btnTestLLM.textContent = '验证大模型连接';
     btnTestLLM.onclick = async () => {
       const base = inpBase.value.trim();
@@ -260,6 +252,7 @@ export class AgentPanel {
       }
       btnTestLLM.disabled = true;
       btnTestLLM.textContent = '验证中...';
+      btnTestLLM.classList.remove('ok', 'fail');
       this._pushLog(`[llm] 正在连接 ${base} (model=${model})...`);
       try {
         const resp = await fetch(`${base}/chat/completions`, {
@@ -283,7 +276,7 @@ export class AgentPanel {
           const reply = data.choices?.[0]?.message?.content || '(空回复)';
           this._pushLog(`[llm] ✓ 连接成功! 模型回复: ${reply}`);
           btnTestLLM.textContent = '✓ 已连接';
-          btnTestLLM.style.cssText = 'background:#242;color:#0F0;border-color:#462;font-size:10px;padding:2px 6px;width:100%;margin-top:2px';
+          btnTestLLM.classList.add('ok');
           // 自动保存配置
           localStorage.setItem('llm_api_base', base);
           localStorage.setItem('llm_api_key', key);
@@ -293,24 +286,23 @@ export class AgentPanel {
             this._llmAgent.apiKey = key;
             this._llmAgent.model = model;
           }
-          const st = this.console.querySelector('#ac-status');
-          if (st) st.textContent = 'LLM 模式 · 已连接 ✓';
+          this._refreshLLMStatus(true);
         } else {
           const errText = await resp.text();
           const errShort = errText.substring(0, 150);
           this._pushLog(`[llm] ✗ 连接失败: HTTP ${resp.status} — ${errShort}`);
           btnTestLLM.textContent = '✗ 连接失败';
-          btnTestLLM.style.cssText = 'background:#422;color:#F44;border-color:#644;font-size:10px;padding:2px 6px;width:100%;margin-top:2px';
+          btnTestLLM.classList.add('fail');
         }
       } catch (e) {
         this._pushLog(`[llm] ✗ 网络错误: ${e.message}`);
         btnTestLLM.textContent = '✗ 网络错误';
-        btnTestLLM.style.cssText = 'background:#422;color:#F44;border-color:#644;font-size:10px;padding:2px 6px;width:100%;margin-top:2px';
+        btnTestLLM.classList.add('fail');
       } finally {
         btnTestLLM.disabled = false;
         setTimeout(() => {
           btnTestLLM.textContent = '验证大模型连接';
-          btnTestLLM.style.cssText = 'background:#242;color:#FC0;border-color:#462;font-size:10px;padding:2px 6px;width:100%;margin-top:2px';
+          btnTestLLM.classList.remove('ok', 'fail');
         }, 5000);
       }
     };
@@ -406,10 +398,26 @@ export class AgentPanel {
   /** 设置仿真智能体 (浏览器内跑全流程) */
   setMockAgent(agent) {
     this._mockAgent = agent;
-    const el = this.console.querySelector('#ac-status');
-    el.textContent = '待配置 API Key';
-    el.className = 'ac-status';
+    this._refreshLLMStatus();
     // 快捷按钮直接可用 (不依赖 ROS 连接)
+  }
+
+  /** 根据 localStorage 自动检查并刷新 LLM 配置状态显示 (解决刷新后丢失状态) */
+  _refreshLLMStatus(connected = false) {
+    const el = this.console.querySelector('#ac-status');
+    if (!el) return;
+    const savedKey = localStorage.getItem('llm_api_key') || '';
+    if (connected) {
+      el.textContent = 'LLM · 已连接 ✓';
+      el.className = 'ac-status ok';
+    } else if (savedKey) {
+      const model = localStorage.getItem('llm_model') || 'gpt-4o';
+      el.textContent = `LLM · ${model}`;
+      el.className = 'ac-status ok';
+    } else {
+      el.textContent = '待配置 API Key';
+      el.className = 'ac-status';
+    }
   }
 
   /** 设置数据集生成器 */
@@ -432,7 +440,7 @@ export class AgentPanel {
       this._pushLog('[dataset] 智能体忙, 请稍后再试');
       return;
     }
-    const btn = this.console.querySelector('.ac-quick-btn[style*="422"]');
+    const btn = this.console.querySelector('#ac-gen-dataset');
     if (btn) { btn.disabled = true; btn.textContent = '生成中...'; }
     this._pushLog('[dataset] 开始生成数据集...');
     this._datasetGen.onProgress(msg => this._pushLog(`[dataset] ${msg}`));
@@ -544,10 +552,22 @@ export class AgentPanel {
   }
 
   // ─────────────── 渲染 ───────────────
+
+  /** 轻量 Markdown 渲染: 将 **bold** 转为 <b>, 安全转义 HTML */
+  _renderMd(str) {
+    if (!str) return '';
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>');
+  }
+
   _setBanner(icon, text, detail) {
     this.banner.querySelector('.ab-icon').textContent = icon;
     this.banner.querySelector('.ab-text').textContent = text;
-    this.banner.querySelector('.ab-detail').textContent = detail || '';
+    this.banner.querySelector('.ab-detail').innerHTML = this._renderMd(detail) || '';
     this.banner.classList.add('active');
     clearTimeout(this._bannerTimer);
     // 运行中常驻; 完成/失败常驻; 阶段切换 1.5s 后淡出 (仅当非 busy)
@@ -573,9 +593,26 @@ export class AgentPanel {
     else if (line.startsWith('[exec')) div.classList.add('exec');
     else if (line.startsWith('[perceive]')) div.classList.add('sense');
     else if (line.startsWith('[plan]') || line.startsWith('[nlu]')) div.classList.add('plan');
-    div.textContent = line;
+    // LLM 文本响应 (排除系统消息, 用独特样式高亮模型输出)
+    else if (line.startsWith('[LLM]') && !/\[LLM\]\s*(第\d+轮|启动|模型返回空|模型调用异常|工具参数|⚠|同一目标|连续|guard|图执行|异常|提示计算)/.test(line)) {
+      div.classList.add('llm-resp');
+    }
+    // 渲染 Markdown (**bold** → <b>, 安全转义)
+    div.innerHTML = this._renderMd(line);
     box.appendChild(div);
     box.scrollTop = box.scrollHeight;
+  }
+
+  /** 从 perceive 工具结果更新物体显示 (LLM/MockAgent 模式) */
+  updateObjects(perceiveResult) {
+    if (!perceiveResult || !Array.isArray(perceiveResult.objects)) return;
+    this._objects = perceiveResult.objects.map(o => ({
+      class: o.class || 'unknown',
+      conf: o.confidence,
+      xyz: o.position ? [o.position.x, o.position.y, o.position.z].map(v => Number(v).toFixed(3)).join(', ') : '',
+      reachable: o.reachable,
+    }));
+    this._renderObjects();
   }
 
   _renderObjects() {
@@ -584,7 +621,8 @@ export class AgentPanel {
     el.innerHTML = this._objects.map(o => {
       const conf = o.conf != null ? ` conf=${Number(o.conf).toFixed(2)}` : '';
       const bbox = o.bbox ? ` bbox=[${o.bbox}]` : '';
-      return `<span class="ac-obj"><b>${o.class}</b> @[${o.xyz}]${conf}${bbox}</span>`;
+      const reach = o.reachable === false ? ' <span style="color:#ffaa55">[远]</span>' : '';
+      return `<span class="ac-obj"><b>${o.class}</b> @[${o.xyz}]${conf}${bbox}${reach}</span>`;
     }).join('');
   }
 }

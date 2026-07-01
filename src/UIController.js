@@ -28,8 +28,6 @@ export class UIController {
     this._wireRos();
     this._wirePresets();
     this._wireGripper();
-    this._wireIK();
-    this._wireRandomTarget();
     this._buildIKMarker();
     this._buildKeyboardHelp();
     this._buildCollisionToggle();
@@ -392,11 +390,6 @@ export class UIController {
     const x = car.x + fwd * cosY - lat * sinY;
     const y = car.y + fwd * sinY + lat * cosY;
 
-    // 填入 IK 输入框
-    document.getElementById('ik-x').value = x.toFixed(3);
-    document.getElementById('ik-y').value = y.toFixed(3);
-    document.getElementById('ik-z').value = z.toFixed(3);
-
     const target = new THREE.Vector3(x, y, z);
     this._showIKMarker(target);
 
@@ -415,8 +408,8 @@ export class UIController {
     this._targetBox.castShadow = false;
     this.scene.add(this._targetBox);
 
-    const info = document.getElementById('ik-info');
-    if (info) info.innerHTML = `<span class="ok">● 已生成目标色块</span> · 位置 x=${x.toFixed(2)} y=${y.toFixed(2)} z=${z.toFixed(2)} m · 点击"求解 IK"抓取`;
+    const info = document.getElementById('ee-info');
+    if (info) info.innerHTML = `<span class="ok">● 已生成目标色块</span> · 位置 x=${x.toFixed(2)} y=${y.toFixed(2)} z=${z.toFixed(2)} m`;
   }
 
   /**
@@ -425,7 +418,7 @@ export class UIController {
    */
   _approachAndSolve(target) {
     const DESIRED_DIST = 0.28;  // 期望 3D 站位距离 (舒适抓取, 位于臂展可达范围)
-    const info = document.getElementById('ik-info');
+    const info = document.getElementById('ee-info');
     const norm = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 
     // 1. 先尝试原地 IK (试探后自动复位, 不改变当前姿态)
@@ -470,7 +463,7 @@ export class UIController {
     this.chassis.onNavArrived = () => {
       // 到达站位后重试 (此时应收敛)
       const r = this._attemptIK(target);
-      const el = document.getElementById('ik-info');
+      const el = document.getElementById('ee-info');
       el.innerHTML = r.solved
         ? `<span class="ok">✓ 求解成功</span> · 误差 ${r.error.toFixed(4)}m · ${r.iterations} 次迭代`
         : `<span class="warn">△ 未完全收敛</span> · 误差 ${r.error.toFixed(4)}m · ${r.iterations} 次迭代`;
@@ -496,7 +489,7 @@ export class UIController {
       this.ros.sendArmCommand(GRIPPER_POSES.close);
       this.robot.tweenTo(GRIPPER_POSES.close, 0.5, () => {
         this._syncAllSlidersFromRobot();
-        const el = document.getElementById('ik-info');
+        const el = document.getElementById('ee-info');
         if (el) el.innerHTML += ' · <span class="ok">夹爪已闭合</span>';
       });
     });
@@ -575,8 +568,7 @@ export class UIController {
     const p = this.robot.getEndEffectorPosition();
     const q = this.robot.getEndEffectorQuaternion();
     const euler = new THREE.Euler().setFromQuaternion(q, 'ZYX');
-    const el = document.getElementById('ee-info');
-    el.innerHTML = `
+    this._lastEeHtml = `
       <b>link5 世界位姿</b><br>
       位置: x=${p.x.toFixed(3)} y=${p.y.toFixed(3)} z=${p.z.toFixed(3)} m<br>
       姿态: R=${THREE.MathUtils.radToDeg(euler.x).toFixed(1)}°
@@ -593,10 +585,31 @@ export class UIController {
     if (spdEl && this.chassis) {
       spdEl.textContent = `v=${this.chassis.v.toFixed(2)} m/s  w=${this.chassis.w.toFixed(2)} rad/s`;
     }
-    // 自主导航进度
-    if (this.chassis && this.chassis._navActive) {
-      const info = document.getElementById('ik-info');
-      if (info) info.innerHTML = `<span class="warn">↻ 自动靠近目标中… 剩余 ${this.chassis._navDist.toFixed(2)} m</span>`;
+    // 右侧栏: 末端位姿 + 导航状态整合显示
+    const eeEl = document.getElementById('ee-info');
+    if (eeEl) {
+      const navOn = !!(this.chassis && this.chassis._navActive);
+      if (navOn) {
+        // 导航进行中: 显示进度, 清除任何待恢复的定时器
+        eeEl.innerHTML = (this._lastEeHtml || '') +
+          `<br><span class="warn">↻ 自动靠近目标中… 剩余 ${this.chassis._navDist.toFixed(2)} m</span>`;
+        this._prevNav = true;
+        clearTimeout(this._navFadeT);
+        this._navFadeT = null;
+      } else if (this._prevNav) {
+        // 导航刚结束 → 短暂显示"✓ 已到达", 1.5s 后自动恢复纯 EE 位姿
+        eeEl.innerHTML = (this._lastEeHtml || '') +
+          '<br><span class="ok">✓ 底盘已到达目标站位</span>';
+        this._prevNav = false;
+        this._navFadeT = setTimeout(() => {
+          this._navFadeT = null;
+          if (eeEl && this._lastEeHtml) eeEl.innerHTML = this._lastEeHtml;
+        }, 1500);
+      } else if (this._navFadeT == null) {
+        // 无导航且无待恢复定时器 → 正常显示 EE 位姿
+        eeEl.innerHTML = this._lastEeHtml || '';
+      }
+      // else: 等待恢复定时器运行中, 保持当前 "✓ 已到达" 显示
     }
     // 关节动画期间, 滑块跟随插值实时更新
     if (this.robot.isTweening) {

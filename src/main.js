@@ -81,6 +81,10 @@ async function main() {
     binSlots: mockAgent._binSlots || {},
   });
   mcpExecutor.onLog(msg => agentPanel._onLog(msg));
+  // perceive 工具执行成功后更新面板物体检测显示
+  mcpExecutor.onToolResult = (name, result) => {
+    if (name === 'perceive') agentPanel.updateObjects(result);
+  };
 
   // 7.9 LLM 大模型智能体 (基于 LangGraph StateGraph: agent↔tools 循环)
   // 接口与 LLMAgent 一致, 可直接换回 new LLMAgent({...}) 作原生模式
