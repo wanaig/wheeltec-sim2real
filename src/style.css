@@ -412,8 +412,8 @@ kbd {
   padding: 8px 10px;
   border-bottom: 1px solid rgba(80,120,200,0.15);
 }
-.ac-title { font-size: 12px; font-weight: 600; color: #88bbff; flex: 1; text-transform: uppercase; letter-spacing: 0.6px; }
-.ac-status { font-size: 10px; padding: 2px 8px; border-radius: 10px; border: 1px solid rgba(80,120,200,0.3); color: #99aabb; }
+.ac-title { font-size: 12px; font-weight: 600; color: #88bbff; flex: 1 1 0; min-width: 0; text-transform: uppercase; letter-spacing: 0.6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ac-status { font-size: 10px; padding: 2px 8px; border-radius: 10px; border: 1px solid rgba(80,120,200,0.3); color: #99aabb; white-space: nowrap; flex-shrink: 0; }
 .ac-status.ok { color: #66ff99; border-color: #339955; background: rgba(40,80,50,0.3); }
 .ac-head .mini-btn { flex: 0 0 auto; padding: 3px 10px; }
 .ac-body { padding: 8px 10px; overflow-y: auto; }
