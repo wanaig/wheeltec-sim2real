@@ -294,13 +294,14 @@ export const MCP_TOOLS = [
 
 export class MCPToolExecutor {
   /**
-   * @param {object} ctx — { mockAgent, robot, ik, chassis, binSlots }
+   * @param {object} ctx — { mockAgent, robot, ik, chassis, ros, binSlots }
    */
   constructor(ctx) {
     this.agent = ctx.mockAgent;
     this.robot = ctx.robot;
     this.ik = ctx.ik;
     this.chassis = ctx.chassis;
+    this.ros = ctx.ros;
     this.binSlots = ctx.binSlots || {};
     this._plannedTrajectory = null;  // plan_arm_motion → execute_arm_motion
     this._lastAboveJoints = null;   // 最近一次 plan_arm_motion 下降段"目标正上方"关节角, 供 retract 逆序垂直抬升
@@ -309,6 +310,21 @@ export class MCPToolExecutor {
 
   onLog(cb) { this._logCb = cb; }
   _log(msg) { if (this._logCb) this._logCb(msg); }
+
+  _sendArmCommand(targetMap) {
+    if (!this.ros?.publishEnabled || !this.ros?.connected) return;
+    this.ros.sendArmCommand(targetMap);
+  }
+
+  _tweenArmTo(targetMap, duration) {
+    this._sendArmCommand(targetMap);
+    return new Promise(resolve => {
+      this.robot.tweenTo(targetMap, duration, () => {
+        this._sendArmCommand(targetMap);
+        resolve();
+      });
+    });
+  }
 
   /** 获取当前夹持的工具 (null=未持物) */
   _getHeldObject() {
@@ -819,9 +835,7 @@ export class MCPToolExecutor {
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
       this._log(`[MCP] 执行段 ${i + 1}/${segments.length}: ${seg.desc} (${seg.duration}s)`);
-      await new Promise(resolve => {
-        this.robot.tweenTo(seg.joints, seg.duration, () => resolve());
-      });
+      await this._tweenArmTo(seg.joints, seg.duration);
       const tcp = this.robot.getGripperTCP();
       executed.push({
         segment: i + 1, desc: seg.desc,
@@ -844,9 +858,7 @@ export class MCPToolExecutor {
 
   // ── grasp ──
   async _grasp() {
-    await new Promise(resolve => {
-      this.robot.tweenTo({ ...GRIPPER_POSES.close }, 0.8, () => resolve());
-    });
+    await this._tweenArmTo({ ...GRIPPER_POSES.close }, 0.8);
     const ok = this.agent._graspNearest();
     const held = this._getHeldObject();
     return {
@@ -860,9 +872,7 @@ export class MCPToolExecutor {
   // ── release ──
   async _release() {
     const heldBefore = this._getHeldObject();
-    await new Promise(resolve => {
-      this.robot.tweenTo({ ...GRIPPER_POSES.open }, 0.6, () => resolve());
-    });
+    await this._tweenArmTo({ ...GRIPPER_POSES.open }, 0.6);
     this.agent._release();
     const tcp = this.robot.getGripperTCP();
     // 检查是否落入某个料箱格子
@@ -986,9 +996,7 @@ export class MCPToolExecutor {
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
       this._log(`[MCP] 执行段 ${i + 1}/${segments.length}: ${seg.desc} (${seg.duration}s)`);
-      await new Promise(resolve => {
-        this.robot.tweenTo(seg.joints, seg.duration, () => resolve());
-      });
+      await this._tweenArmTo(seg.joints, seg.duration);
     }
     const tcp = this.robot.getGripperTCP();
     return {

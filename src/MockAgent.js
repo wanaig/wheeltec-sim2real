@@ -32,11 +32,13 @@ const BIN_SLOTS = {
 
 // ─────────────── MockAgent ───────────────
 export class MockAgent {
-  constructor(robot, ik, sceneSetup, panel) {
+  constructor(robot, ik, sceneSetup, panel, ros = null, chassis = null) {
     this.robot = robot;
     this.ik = ik;
     this.scene = sceneSetup.scene;
     this.panel = panel;
+    this.ros = ros;
+    this.chassis = chassis;
     this._busy = false;
     this._injectFailure = false; // 模拟放置失败 (下次 _release 偏移)
     this._benchTopZ = 0.060;     // 台面顶高度 (供 DatasetGenerator 引用)
@@ -61,6 +63,7 @@ export class MockAgent {
 
     // 当前布局名
     this._currentLayout = DEFAULT_LAYOUT;
+    this._lastCmdVelSent = 0;
 
     this._buildScene3D();
     this._buildTools();
@@ -667,8 +670,36 @@ export class MockAgent {
       this._log(`[arm] 拒绝执行: 轨迹碰撞 ${hit}`);
       return { ok: false, reason: 'trajectory_collision', detail: hit };
     }
+    this._sendArmCommand(target);
     return new Promise(resolve => {
-      this.robot.tweenTo(target, duration, () => resolve({ ok: true }));
+      this.robot.tweenTo(target, duration, () => {
+        this._sendArmCommand(target);
+        resolve({ ok: true });
+      });
+    });
+  }
+
+  _sendArmCommand(target) {
+    if (!this.ros?.publishEnabled || !this.ros?.connected) return;
+    this.ros.sendArmCommand(target);
+  }
+
+  _sendCmdVel(v, w, force = false) {
+    if (!this.ros?.publishEnabled || !this.ros?.connected) return;
+    const now = performance.now();
+    if (!force && now - this._lastCmdVelSent < 50) return;
+    this._lastCmdVelSent = now;
+    this.ros.sendCmdVel(v, w);
+  }
+
+  _navigateChassisTo(x, y, yaw) {
+    if (!this.chassis) return null;
+    return new Promise(resolve => {
+      this.chassis.navigateTo(x, y, yaw);
+      this.chassis.onNavArrived = () => {
+        this._sendCmdVel(0, 0, true);
+        resolve();
+      };
     });
   }
 
@@ -731,6 +762,28 @@ export class MockAgent {
       this._log(`[chassis] 路径规划: ${waypoints.length}个航点 (绕行工作台)`);
     }
 
+    if (this.chassis) {
+      for (let i = 0; i < waypoints.length; i++) {
+        const wp = waypoints[i];
+        const isLast = i === waypoints.length - 1;
+        const next = waypoints[i + 1];
+        const wpYaw = isLast
+          ? yaw
+          : (next ? Math.atan2(next.y - wp.y, next.x - wp.x) : this.robot.root.rotation.z);
+        this._log(`[chassis] 航点 ${i + 1}/${waypoints.length}: → (${wp.x.toFixed(2)}, ${wp.y.toFixed(2)})`);
+        const navPromise = this._navigateChassisTo(wp.x, wp.y, wpYaw).then(() => 'arrived');
+        const timeoutPromise = new Promise(resolve => setTimeout(() => resolve('timeout'), 20000));
+        const navResult = await Promise.race([navPromise, timeoutPromise]);
+        if (navResult === 'timeout') {
+          this.chassis.cancelNav();
+          this._sendCmdVel(0, 0, true);
+          return { ok: false, reason: 'chassis_timeout', detail: `底盘移动到航点${i + 1}超时` };
+        }
+      }
+      this._sendCmdVel(0, 0, true);
+      return { ok: true };
+    }
+
     // 3. 沿航点差速移动 (原地转向 → 直行到达, 符合4WD差速运动学)
     const root = this.robot.root;
     const maxLin = 0.35, maxAng = 1.2, accel = 1.5, angAccel = 4.0;
@@ -781,7 +834,7 @@ export class MockAgent {
             arrived = true;
           }
 
-          if (arrived) { resolve(); return; }
+          if (arrived) { this._sendCmdVel(0, 0, true); resolve(); return; }
 
           const maxDv = accel * dt, maxDw = angAccel * dt;
           v += Math.max(-maxDv, Math.min(maxDv, targetV - v));
@@ -800,13 +853,15 @@ export class MockAgent {
           this.robot.setJoint(WHEEL_JOINT_NAMES[1], this.robot.getJoint(WHEEL_JOINT_NAMES[1]) + wL);
           this.robot.setJoint(WHEEL_JOINT_NAMES[2], this.robot.getJoint(WHEEL_JOINT_NAMES[2]) + wR);
           this.robot.setJoint(WHEEL_JOINT_NAMES[3], this.robot.getJoint(WHEEL_JOINT_NAMES[3]) + wR);
+          this._sendCmdVel(v, w);
 
           requestAnimationFrame(step);
         };
         step();
       });
-      if (timeout) { this._log('[chassis] 航点超时, 跳过'); break; }
+      if (timeout) { this._sendCmdVel(0, 0, true); this._log('[chassis] 航点超时, 跳过'); break; }
     }
+    this._sendCmdVel(0, 0, true);
     return { ok: true };
   }
 

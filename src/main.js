@@ -68,7 +68,7 @@ async function main() {
   ros._agentPanel = agentPanel;
 
   // 7.6 仿真智能体 (LLM 大模型 + MCP 工具调用)
-  const mockAgent = new MockAgent(robot, ik, scene, agentPanel);
+  const mockAgent = new MockAgent(robot, ik, scene, agentPanel, ros, chassis);
   agentPanel.setMockAgent(mockAgent);
 
   // 7.7 数据集生成器
@@ -77,7 +77,7 @@ async function main() {
 
   // 7.8 MCP 工具执行器 (大模型 function calling 的后端)
   const mcpExecutor = new MCPToolExecutor({
-    mockAgent, robot, ik, chassis,
+    mockAgent, robot, ik, chassis, ros,
     binSlots: mockAgent._binSlots || {},
   });
   mcpExecutor.onLog(msg => agentPanel._onLog(msg));

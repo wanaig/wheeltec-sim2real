@@ -90,7 +90,12 @@ export class ChassisController {
     this._navActive = false;
     this._navGoal = null;
     this.onNavArrived = null;
+    this.v = 0;
+    this.w = 0;
+    if (this.ros.publishEnabled && this.ros.connected) this.ros.sendCmdVel(0, 0);
   }
+
+  get navActive() { return this._navActive; }
 
   /** 计算导航目标速度 (比例控制器 + 制动限速, 抑制超调) */
   _computeNavVel(dt) {
@@ -174,6 +179,7 @@ export class ChassisController {
         const cb = this.onNavArrived;
         this.onNavArrived = null;
         this._navGoal = null;
+        if (this.ros.publishEnabled && this.ros.connected) this.ros.sendCmdVel(0, 0);
         if (cb) cb();
       }
     } else {
