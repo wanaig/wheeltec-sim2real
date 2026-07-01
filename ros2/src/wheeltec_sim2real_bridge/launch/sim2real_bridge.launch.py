@@ -1,4 +1,4 @@
-"""sim2real 桥接启动文件 (ROS2)
+"""sim2real bridge launch for Ubuntu 20.04 + ROS2 Foxy.
 
 启动串口桥接节点 (真机) 或 mock 节点 (无硬件测试), 可选同时启动 rosbridge_server。
 
@@ -20,10 +20,9 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction
+from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
-from launch.substitutions import (
-    Command, LaunchConfiguration, PythonExpression)
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 

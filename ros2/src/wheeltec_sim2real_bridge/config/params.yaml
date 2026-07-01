@@ -1,14 +1,21 @@
-# wheeltec_sim2real_bridge 参数 (对应 ROS1 base_serial.launch 的 private_nh.param)
-# 真机串口桥接节点 serial_bridge 使用; mock 节点忽略串口参数。
+# wheeltec_sim2real_bridge 参数 (Ubuntu 20.04 + ROS2 Foxy)
+# 对照 D:\a ROS1 wheeltec_arm_pick/launch/base_serial.launch 与 wheeltec_arm_six.cpp。
 wheeltec_arm_six:
   ros__parameters:
-    usart_port_name: /dev/wheeltec_controller   # 下位机串口设备
-    serial_baud_rate: 115200                    # 与 STM32 一致, 不建议更高
-    robot_frame_id: base_link                   # 里程计子坐标系
-    odom_frame_id: odom_combined                # 里程计父坐标系
-    joint_num: 4                                # 机械臂关节起始编号 (保留兼容)
-    product_number: 1                           # 产品型号 (底盘帧 tx[1])
-    # STM32 上行帧不含机械臂关节角 (开环舵机, 无编码器反馈)。
-    # true: 把 voice_joint_states 指令值回显到 /joint_states 供仿真镜像 (无 MoveIt2 时用);
-    # false: 由 MoveIt2 joint_state_publisher 提供 /joint_states (避免双发布者冲突)。
-    echo_joint_states: false
+    usart_port_name: /dev/wheeltec_controller
+    serial_baud_rate: 115200
+    robot_frame_id: base_link
+    odom_frame_id: odom_combined
+    product_number: 1
+    joint_num: 4
+
+    # 前端 RosBridge.js 发布的话题。不要改名, 除非前端同步修改。
+    arm_command_topic: voice_joint_states
+    cmd_vel_topic: cmd_vel
+
+    # STM32 上行帧没有机械臂编码器角度。true 表示把下发的关节目标值回显为
+    # /joint_states, 让浏览器数字孪生和 robot_state_publisher 能同步显示。
+    echo_joint_states: true
+    init_arm_on_startup: true
+    publish_tf: true
+    read_timeout_sec: 0.02

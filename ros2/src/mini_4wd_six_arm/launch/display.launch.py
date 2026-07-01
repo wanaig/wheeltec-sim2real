@@ -1,11 +1,11 @@
-"""mini_4wd_six_arm 模型启动 (ROS2)
+"""mini_4wd_six_arm model launch for ROS2 Foxy.
 
-发布 robot_description (URDF) + robot_state_publisher (TF 坐标树) + joint_state_publisher
-(默认关节角, 真机/仿真通过 /joint_states 覆盖)。可选 rviz2 可视化。
+Publishes robot_description and robot_state_publisher. joint_state_publisher is
+optional and should stay disabled when serial_bridge echo_joint_states is true.
 
 参数:
     use_rviz (bool, 默认 False) 是否启动 rviz2
-    jsp      (bool, 默认 True)  是否启动 joint_state_publisher (无 /joint_states 发布者时用)
+    jsp      (bool, 默认 False) 是否启动 joint_state_publisher
 
 用法:
     ros2 launch mini_4wd_six_arm display.launch.py
@@ -31,7 +31,7 @@ def generate_launch_description():
     use_rviz_arg = DeclareLaunchArgument(
         'use_rviz', default_value='false', description='启动 rviz2')
     jsp_arg = DeclareLaunchArgument(
-        'jsp', default_value='true',
+        'jsp', default_value='false',
         description='启动 joint_state_publisher (无外部 /joint_states 时用)')
 
     robot_state_publisher = Node(

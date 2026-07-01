@@ -1,23 +1,22 @@
-"""sim2real 总启动 (ROS2) — 一条命令拉起完整数字孪生系统。
+"""sim2real bringup for Ubuntu 20.04 + ROS2 Foxy.
 
 组合:
-    1. mini_4wd_six_arm display  → robot_state_publisher (URDF→TF 坐标树) [+ joint_state_publisher]
-    2. serial_bridge (真机串口) 或 mock_joint_states (无硬件)
-    3. rosbridge_websocket       → 供浏览器 roslibjs 前端连接
+    1. mini_4wd_six_arm display -> robot_state_publisher (URDF -> TF)
+    2. serial_bridge (real robot serial) or mock_joint_states (no hardware)
+    3. rosbridge_websocket -> browser roslibjs frontend
 
 参数:
     mock              (bool, 默认 False) True=无硬件 mock 节点; False=真机串口桥接
     rosbridge         (bool, 默认 True)  启动 rosbridge_websocket
     port              (int,  默认 9090)  rosbridge 端口
-    jsp               (bool, 默认 False) 启动 joint_state_publisher (无 /joint_states 源时用)
+    jsp               (bool, 默认 False) 启动 joint_state_publisher
     use_rviz          (bool, 默认 False) 启动 rviz2
-    echo_joint_states (bool, 默认 False) serial_bridge 把 voice_joint_states 回显到 /joint_states
-                                        (真机无 MoveIt2 时开启, 让仿真镜像臂关节)
+    echo_joint_states (bool, 默认 True) serial_bridge 把 voice_joint_states 回显到 /joint_states
     params_file       (str)  serial_bridge 参数文件
 
 示例:
-    # 真机 (从 ROS1 迁移, 无 turn_on_wheeltec_robot)
-    ros2 launch wheeltec_sim2real_bridge bringup.launch.py echo_joint_states:=true
+    # 真机
+    ros2 launch wheeltec_sim2real_bridge bringup.launch.py
     # 无硬件全链路测试 (含相机彩条)
     ros2 launch wheeltec_sim2real_bridge bringup.launch.py mock:=true
 """
@@ -43,7 +42,7 @@ def generate_launch_description():
     port_arg = DeclareLaunchArgument('port', default_value='9090')
     jsp_arg = DeclareLaunchArgument('jsp', default_value='false')
     rviz_arg = DeclareLaunchArgument('use_rviz', default_value='false')
-    echo_arg = DeclareLaunchArgument('echo_joint_states', default_value='false')
+    echo_arg = DeclareLaunchArgument('echo_joint_states', default_value='true')
     params_arg = DeclareLaunchArgument(
         'params_file', default_value=default_params)
 

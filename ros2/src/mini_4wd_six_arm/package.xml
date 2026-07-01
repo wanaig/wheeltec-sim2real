@@ -4,7 +4,7 @@
   <name>mini_4wd_six_arm</name>
   <version>1.0.0</version>
   <description>
-    WHEELTEC mini_4wd_six_arm (迷你四驱 + 6 自由度机械臂) URDF 模型包 (ROS2)。
+    WHEELTEC mini_4wd_six_arm URDF model package for Ubuntu 20.04 + ROS2 Foxy。
     由 ROS1 mini_4wd_six_arm 包移植: 包含 SolidWorks 导出的 URDF + 16 个 STL 网格,
     提供 robot_state_publisher 启动 (发布 TF 坐标树) 供 sim2real 数字孪生前端使用。
   </description>
