@@ -256,15 +256,29 @@ export class MockAgent {
     return new THREE.CanvasTexture(cv);
   }
 
-  /** 重置场景 (工具归位到当前布局) */
+  /** 重置场景 (工具归位到当前布局, 机械臂归零, 夹爪张开, 底盘停止) */
   resetScene() {
     // 重新生成当前布局 (回到初始状态)
     this.applyLayout(
       generateLayout(this._currentLayout, this._benchTopZ)
     );
-    this.robot.tweenTo(
-      { ...PRESETS.arm_home, joint6: 0.45 }, 1.0);
-    this._log('[reset] 场景已重置, 工具归位');
+    // 取消底盘导航, 停止移动
+    if (this.chassis && this.chassis._navActive) {
+      this.chassis.cancelNav();
+    }
+    if (this.chassis) {
+      this.chassis.v = 0;
+      this.chassis.w = 0;
+    }
+    // 机械臂归零 + 夹爪完全张开 (与归零按钮行为一致)
+    const resetPose = { ...PRESETS.arm_home, ...GRIPPER_POSES.open };
+    this.robot.tweenTo(resetPose, 1.0);
+    // 同步发布到真机
+    this._sendArmCommand(resetPose);
+    if (this.chassis && this.ros?.publishEnabled && this.ros?.connected) {
+      this.ros.sendCmdVel(0, 0);
+    }
+    this._log('[reset] 场景已重置, 机械臂归零, 夹爪张开');
     this._setStatus('done', '场景重置');
   }
 

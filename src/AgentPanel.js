@@ -153,16 +153,6 @@ export class AgentPanel {
     btnReset.textContent = '重置场景';
     btnReset.onclick = () => { if (this._mockAgent) this._mockAgent.resetScene(); };
     ctrlRow.appendChild(btnReset);
-    const btnFail = document.createElement('button');
-    btnFail.className = 'ac-quick-btn fail';
-    btnFail.textContent = '模拟放置失败';
-    btnFail.onclick = () => {
-      if (this._mockAgent) {
-        this._mockAgent._injectFailure = true;
-        this._pushLog('[local] 已设置: 下次放置将偏移 (模拟未入格)');
-      }
-    };
-    ctrlRow.appendChild(btnFail);
     quick.appendChild(ctrlRow);
 
     // 场景布局切换 + 数据集生成
