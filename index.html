@@ -110,26 +110,26 @@
       <div id="camera-grid">
         <div class="camera-slot">
           <div class="camera-bar">
-            <span class="camera-label">相机1</span>
-            <input class="cam-topic" type="text" value="/image_raw/compressed" data-cam="0" />
+            <span class="camera-label">手眼相机</span>
+            <input class="cam-topic" type="text" value="/eye_in_hand/image_raw/compressed" data-cam="0" />
             <select class="cam-kind" data-cam="0">
               <option value="compressed" selected>CompressedImage</option>
               <option value="raw">Image (raw)</option>
             </select>
-            <label class="checkbox cam-en"><input type="checkbox" data-cam="0" /> 启用</label>
+            <label class="checkbox cam-en"><input type="checkbox" data-cam="0" checked /> 启用</label>
           </div>
           <canvas class="cam-canvas" data-cam="0" width="320" height="240"></canvas>
           <div class="cam-status" data-cam="0">未启用</div>
         </div>
         <div class="camera-slot">
           <div class="camera-bar">
-            <span class="camera-label">相机2</span>
-            <input class="cam-topic" type="text" value="/usb_cam/image_raw/compressed" data-cam="1" />
+            <span class="camera-label">外部相机</span>
+            <input class="cam-topic" type="text" value="/eye_to_hand/image_raw/compressed" data-cam="1" />
             <select class="cam-kind" data-cam="1">
               <option value="compressed" selected>CompressedImage</option>
               <option value="raw">Image (raw)</option>
             </select>
-            <label class="checkbox cam-en"><input type="checkbox" data-cam="1" /> 启用</label>
+            <label class="checkbox cam-en"><input type="checkbox" data-cam="1" checked /> 启用</label>
           </div>
           <canvas class="cam-canvas" data-cam="1" width="320" height="240"></canvas>
           <div class="cam-status" data-cam="1">未启用</div>

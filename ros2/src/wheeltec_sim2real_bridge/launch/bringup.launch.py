@@ -8,6 +8,7 @@
 参数:
     mock              (bool, 默认 False) True=无硬件 mock 节点; False=真机串口桥接
     rosbridge         (bool, 默认 True)  启动 rosbridge_websocket
+    cameras           (bool, 默认 True)  启动双 USB 摄像头桥接
     port              (int,  默认 9090)  rosbridge 端口
     jsp               (bool, 默认 False) 启动 joint_state_publisher
     use_rviz          (bool, 默认 False) 启动 rviz2
@@ -39,6 +40,14 @@ def generate_launch_description():
 
     mock_arg = DeclareLaunchArgument('mock', default_value='false')
     rosbridge_arg = DeclareLaunchArgument('rosbridge', default_value='true')
+    cameras_arg = DeclareLaunchArgument('cameras', default_value='true')
+    eye_in_hand_device_arg = DeclareLaunchArgument(
+        'eye_in_hand_device', default_value='/dev/HandCam')
+    eye_to_hand_device_arg = DeclareLaunchArgument(
+        'eye_to_hand_device', default_value='/dev/RgbCam')
+    camera_width_arg = DeclareLaunchArgument('camera_width', default_value='640')
+    camera_height_arg = DeclareLaunchArgument('camera_height', default_value='480')
+    camera_fps_arg = DeclareLaunchArgument('camera_fps', default_value='15.0')
     port_arg = DeclareLaunchArgument('port', default_value='9090')
     jsp_arg = DeclareLaunchArgument('jsp', default_value='false')
     rviz_arg = DeclareLaunchArgument('use_rviz', default_value='false')
@@ -95,7 +104,26 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('rosbridge')),
     )
 
+    # 4. 双摄像头: 手眼 + 外部眼, 发布 CompressedImage 供前端订阅
+    camera_node = Node(
+        package='wheeltec_sim2real_bridge',
+        executable='dual_camera_bridge',
+        name='dual_camera_bridge',
+        output='screen',
+        parameters=[{
+            'eye_in_hand_device': LaunchConfiguration('eye_in_hand_device'),
+            'eye_to_hand_device': LaunchConfiguration('eye_to_hand_device'),
+            'image_width': LaunchConfiguration('camera_width'),
+            'image_height': LaunchConfiguration('camera_height'),
+            'fps': LaunchConfiguration('camera_fps'),
+        }],
+        condition=IfCondition(LaunchConfiguration('cameras')),
+    )
+
     return LaunchDescription([
-        mock_arg, rosbridge_arg, port_arg, jsp_arg, rviz_arg, echo_arg, params_arg,
-        arm_display, serial_node, mock_node, rosbridge_node,
+        mock_arg, rosbridge_arg, cameras_arg,
+        eye_in_hand_device_arg, eye_to_hand_device_arg,
+        camera_width_arg, camera_height_arg, camera_fps_arg,
+        port_arg, jsp_arg, rviz_arg, echo_arg, params_arg,
+        arm_display, serial_node, mock_node, rosbridge_node, camera_node,
     ])

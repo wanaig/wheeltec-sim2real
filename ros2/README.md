@@ -71,7 +71,7 @@ ros2/src/
 sudo apt update
 sudo apt install -y ros-foxy-rosbridge-suite \
   ros-foxy-robot-state-publisher ros-foxy-joint-state-publisher \
-  python3-colcon-common-extensions python3-serial
+  python3-colcon-common-extensions python3-serial python3-opencv
 
 cd ~/ros2
 source /opt/ros/foxy/setup.bash
@@ -93,8 +93,42 @@ ros2 launch wheeltec_sim2real_bridge bringup.launch.py
 - `robot_state_publisher`
 - `serial_bridge`
 - `rosbridge_websocket`，端口 `9090`
+- `dual_camera_bridge`，发布手眼和外部双路相机画面
 
 默认不会启动 `joint_state_publisher`，因为 `serial_bridge` 已经发布 `/joint_states` 回显。
+
+## 双摄像头
+
+真机默认读取两个摄像头设备：
+
+| 相机 | 默认设备 | 默认压缩图像话题 |
+|---|---|---|
+| 手眼相机 | `/dev/HandCam` | `/eye_in_hand/image_raw/compressed` |
+| 外部相机 | `/dev/RgbCam` | `/eye_to_hand/image_raw/compressed` |
+
+旧 WHEELTEC 工程里的 RGB 摄像头默认设备是 `/dev/RgbCam`，本项目继续沿用它作为外部眼；手眼相机新增使用 `/dev/HandCam`。
+
+如果你还没有固定设备名，可以先临时软链接：
+
+```bash
+ls -l /dev/video*
+sudo ln -sf /dev/video0 /dev/HandCam
+sudo ln -sf /dev/video1 /dev/RgbCam
+```
+
+也可以启动时直接指定设备：
+
+```bash
+ros2 launch wheeltec_sim2real_bridge bringup.launch.py \
+  eye_in_hand_device:=/dev/video0 \
+  eye_to_hand_device:=/dev/video1
+```
+
+如果暂时不启动相机：
+
+```bash
+ros2 launch wheeltec_sim2real_bridge bringup.launch.py cameras:=false
+```
 
 ## 前端连接
 
@@ -131,6 +165,8 @@ ros2 topic info /cmd_vel
 ros2 topic echo /odom
 ros2 topic echo /joint_states
 ros2 topic echo /PowerVoltage
+ros2 topic hz /eye_in_hand/image_raw/compressed
+ros2 topic hz /eye_to_hand/image_raw/compressed
 ```
 
 手动测试底盘：

@@ -90,6 +90,7 @@ export class UIController {
           if (enCb.checked) cam.enable();
           else cam.disable();
         });
+        if (enCb.checked) cam.enable();
       }
     });
   }

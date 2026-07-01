@@ -69,11 +69,15 @@ class MockRobotNode(Node):
                     CompressedImage, '/image_raw/compressed', 10)
                 self.cmp_pub2 = self.create_publisher(
                     CompressedImage, '/usb_cam/image_raw/compressed', 10)
+                self.cmp_pub_eye_in_hand = self.create_publisher(
+                    CompressedImage, '/eye_in_hand/image_raw/compressed', 10)
+                self.cmp_pub_eye_to_hand = self.create_publisher(
+                    CompressedImage, '/eye_to_hand/image_raw/compressed', 10)
             self._cam_t = 0.0
             self.create_timer(0.1, self._pub_test_image)  # 10Hz
             if _HAS_COMPRESSED and _HAS_PIL:
                 self.get_logger().info(
-                    'mock 相机: 发布 /image_raw/compressed (CompressedImage, jpeg)')
+                    'mock 相机: 发布 /eye_in_hand/image_raw/compressed 和 /eye_to_hand/image_raw/compressed')
             else:
                 self.get_logger().info(
                     'mock 相机: 发布 /usb_cam/image_raw (raw rgb8). '
@@ -151,7 +155,9 @@ class MockRobotNode(Node):
                 img.save(out, format='JPEG', quality=60)
                 jpg = out.getvalue()
             for pub in (getattr(self, 'cmp_pub', None),
-                        getattr(self, 'cmp_pub2', None)):
+                        getattr(self, 'cmp_pub2', None),
+                        getattr(self, 'cmp_pub_eye_in_hand', None),
+                        getattr(self, 'cmp_pub_eye_to_hand', None)):
                 if pub is None:
                     continue
                 msg = CompressedImage()
