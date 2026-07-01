@@ -29,6 +29,7 @@ setup(
             'serial_bridge = wheeltec_sim2real_bridge.serial_bridge:main',
             'mock_joint_states = wheeltec_sim2real_bridge.mock_joint_states:main',
             'dual_camera_bridge = wheeltec_sim2real_bridge.dual_camera_bridge:main',
+            'rgbd_tool_detector = wheeltec_sim2real_bridge.rgbd_tool_detector:main',
         ],
     },
 )

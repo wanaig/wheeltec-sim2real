@@ -9,6 +9,7 @@
     mock              (bool, 默认 False) True=无硬件 mock 节点; False=真机串口桥接
     rosbridge         (bool, 默认 True)  启动 rosbridge_websocket
     cameras           (bool, 默认 True)  启动双 USB 摄像头桥接
+    rgbd_detector     (bool, 默认 False) 启动 RGB-D 工业工具检测/标注节点
     port              (int,  默认 9090)  rosbridge 端口
     jsp               (bool, 默认 False) 启动 joint_state_publisher
     use_rviz          (bool, 默认 False) 启动 rviz2
@@ -41,6 +42,7 @@ def generate_launch_description():
     mock_arg = DeclareLaunchArgument('mock', default_value='false')
     rosbridge_arg = DeclareLaunchArgument('rosbridge', default_value='true')
     cameras_arg = DeclareLaunchArgument('cameras', default_value='true')
+    rgbd_detector_arg = DeclareLaunchArgument('rgbd_detector', default_value='false')
     eye_in_hand_device_arg = DeclareLaunchArgument(
         'eye_in_hand_device', default_value='/dev/HandCam')
     eye_to_hand_device_arg = DeclareLaunchArgument(
@@ -48,6 +50,12 @@ def generate_launch_description():
     camera_width_arg = DeclareLaunchArgument('camera_width', default_value='640')
     camera_height_arg = DeclareLaunchArgument('camera_height', default_value='480')
     camera_fps_arg = DeclareLaunchArgument('camera_fps', default_value='15.0')
+    rgbd_rgb_topic_arg = DeclareLaunchArgument(
+        'rgbd_rgb_topic', default_value='/camera/rgb/image_raw')
+    rgbd_depth_topic_arg = DeclareLaunchArgument(
+        'rgbd_depth_topic', default_value='/camera/depth/image_raw')
+    rgbd_camera_info_topic_arg = DeclareLaunchArgument(
+        'rgbd_camera_info_topic', default_value='/camera/rgb/camera_info')
     port_arg = DeclareLaunchArgument('port', default_value='9090')
     jsp_arg = DeclareLaunchArgument('jsp', default_value='false')
     rviz_arg = DeclareLaunchArgument('use_rviz', default_value='false')
@@ -120,10 +128,26 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('cameras')),
     )
 
+    # 5. RGB-D 工业工具/零件检测: 输出 JSON 标注和调试图像
+    rgbd_detector_node = Node(
+        package='wheeltec_sim2real_bridge',
+        executable='rgbd_tool_detector',
+        name='rgbd_tool_detector',
+        output='screen',
+        parameters=[{
+            'rgb_topic': LaunchConfiguration('rgbd_rgb_topic'),
+            'depth_topic': LaunchConfiguration('rgbd_depth_topic'),
+            'camera_info_topic': LaunchConfiguration('rgbd_camera_info_topic'),
+        }],
+        condition=IfCondition(LaunchConfiguration('rgbd_detector')),
+    )
+
     return LaunchDescription([
-        mock_arg, rosbridge_arg, cameras_arg,
+        mock_arg, rosbridge_arg, cameras_arg, rgbd_detector_arg,
         eye_in_hand_device_arg, eye_to_hand_device_arg,
         camera_width_arg, camera_height_arg, camera_fps_arg,
+        rgbd_rgb_topic_arg, rgbd_depth_topic_arg, rgbd_camera_info_topic_arg,
         port_arg, jsp_arg, rviz_arg, echo_arg, params_arg,
         arm_display, serial_node, mock_node, rosbridge_node, camera_node,
+        rgbd_detector_node,
     ])

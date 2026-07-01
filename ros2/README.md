@@ -130,6 +130,49 @@ ros2 launch wheeltec_sim2real_bridge bringup.launch.py \
 ros2 launch wheeltec_sim2real_bridge bringup.launch.py cameras:=false
 ```
 
+## RGB-D 工业工具感知与标注
+
+可选启动 `rgbd_tool_detector`，基于 RGB-D 相机获取桌面工具/零件信息，输出类别、像素框、相机坐标和桌面坐标，用于模拟工业现场和构建数据集。
+
+默认输入话题：
+
+| 输入 | 默认话题 |
+|---|---|
+| RGB 图像 | `/camera/rgb/image_raw` |
+| 深度图像 | `/camera/depth/image_raw` |
+| 相机内参 | `/camera/rgb/camera_info` |
+
+输出话题：
+
+| 输出 | 话题 | 类型 |
+|---|---|---|
+| 工具 JSON 标注 | `/industrial_tools/annotations` | `std_msgs/msg/String` |
+| 带框调试图 | `/industrial_tools/debug_image/compressed` | `sensor_msgs/msg/CompressedImage` |
+
+启动：
+
+```bash
+ros2 launch wheeltec_sim2real_bridge bringup.launch.py rgbd_detector:=true
+```
+
+如果 RGB-D 相机话题不同：
+
+```bash
+ros2 launch wheeltec_sim2real_bridge bringup.launch.py rgbd_detector:=true \
+  rgbd_rgb_topic:=/camera/color/image_raw \
+  rgbd_depth_topic:=/camera/aligned_depth_to_color/image_raw \
+  rgbd_camera_info_topic:=/camera/color/camera_info
+```
+
+验证：
+
+```bash
+ros2 topic echo /industrial_tools/annotations
+ros2 topic hz /industrial_tools/debug_image/compressed
+```
+
+前端连接 rosbridge 后，智能体面板“检测物体”会自动显示 `/industrial_tools/annotations` 中的工具类别、位置坐标、置信度和像素框；也可以把底部任一相机槽话题改为 `/industrial_tools/debug_image/compressed` 查看检测框画面。
+
 ## 前端连接
 
 Windows 上：
@@ -167,6 +210,8 @@ ros2 topic echo /joint_states
 ros2 topic echo /PowerVoltage
 ros2 topic hz /eye_in_hand/image_raw/compressed
 ros2 topic hz /eye_to_hand/image_raw/compressed
+ros2 topic echo /industrial_tools/annotations
+ros2 topic hz /industrial_tools/debug_image/compressed
 ```
 
 手动测试底盘：

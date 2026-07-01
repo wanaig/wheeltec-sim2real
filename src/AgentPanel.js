@@ -82,6 +82,7 @@ export class AgentPanel {
     this.ros = ros;
     this._statusSub = null;
     this._logSub = null;
+    this._toolAnnoSub = null;
     this._instrPub = null;
     this._lastConn = false;
     this._lastVer = null;
@@ -383,13 +384,17 @@ export class AgentPanel {
     this._instrPub = new ROSLIB.Topic({
       ros: this.ros.ros, name: '/agent/instruction', messageType: t, queue_size: 10,
     });
+    this._toolAnnoSub = new ROSLIB.Topic({
+      ros: this.ros.ros, name: '/industrial_tools/annotations', messageType: t, throttle_rate: 200,
+    });
+    this._toolAnnoSub.subscribe((msg) => this._onToolAnnotations(msg.data));
   }
 
   _stopSubs() {
-    [this._statusSub, this._logSub].forEach(s => {
+    [this._statusSub, this._logSub, this._toolAnnoSub].forEach(s => {
       if (s) { try { s.unsubscribe(); } catch (e) {} }
     });
-    this._statusSub = null; this._logSub = null;
+    this._statusSub = null; this._logSub = null; this._toolAnnoSub = null;
   }
 
   /** ROS 版本切换后重建 (消息类型字符串变了) */
@@ -520,6 +525,24 @@ export class AgentPanel {
     this._renderObjects();
   }
 
+  _onToolAnnotations(data) {
+    try {
+      const payload = JSON.parse(data);
+      const objects = Array.isArray(payload.objects) ? payload.objects : [];
+      this._objects = objects.map(o => ({
+        class: o.class_cn || o.class || 'unknown',
+        conf: o.confidence,
+        xyz: Array.isArray(o.position_table_m)
+          ? o.position_table_m.map(v => Number(v).toFixed(3)).join(', ')
+          : '',
+        bbox: Array.isArray(o.bbox_xywh) ? o.bbox_xywh.join(',') : '',
+      }));
+      this._renderObjects();
+    } catch (e) {
+      this._pushLog(`[perception] annotations parse error: ${e.message}`);
+    }
+  }
+
   // ─────────────── 渲染 ───────────────
   _setBanner(icon, text, detail) {
     this.banner.querySelector('.ab-icon').textContent = icon;
@@ -558,7 +581,10 @@ export class AgentPanel {
   _renderObjects() {
     const el = this.console.querySelector('#ac-objects');
     if (!this._objects.length) { el.innerHTML = '—'; return; }
-    el.innerHTML = this._objects.map(o =>
-      `<span class="ac-obj"><b>${o.class}</b> @[${o.xyz}]</span>`).join('');
+    el.innerHTML = this._objects.map(o => {
+      const conf = o.conf != null ? ` conf=${Number(o.conf).toFixed(2)}` : '';
+      const bbox = o.bbox ? ` bbox=[${o.bbox}]` : '';
+      return `<span class="ac-obj"><b>${o.class}</b> @[${o.xyz}]${conf}${bbox}</span>`;
+    }).join('');
   }
 }
