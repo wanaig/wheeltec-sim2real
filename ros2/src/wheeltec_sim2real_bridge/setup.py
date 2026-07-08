@@ -16,6 +16,7 @@ setup(
             'launch/bringup.launch.py',
         ]),
         ('share/' + package_name + '/config', ['config/params.yaml']),
+        ('share/' + package_name + '/scripts', ['scripts/start_astra_hand_camera.sh']),
     ],
     install_requires=['setuptools', 'pyserial'],
     zip_safe=True,

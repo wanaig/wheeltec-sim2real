@@ -134,19 +134,151 @@ roslaunch wheeltec_arm_pick base_serial.launch
 | CompressedImage | `sensor_msgs/msg/CompressedImage` | 推荐, jpeg/png 带宽低 (~15fps) |
 | Image (raw) | `sensor_msgs/msg/Image` | 原始图, 支持 rgb8/bgr0/mono8 (~10fps) |
 
-**默认话题 (mini_4wd_six_arm 单 USB 摄像头):**
-- 相机1: `/image_raw/compressed` (CompressedImage) — `usb_cam` 经 image_transport 重映射的压缩彩色流
-- 相机2: `/usb_cam/image_raw/compressed` (CompressedImage) — 备用, 可改填第二个相机话题
+**默认话题 (双相机: 外部 USB 摄像头 + 手眼 Astra S):**
+- 手眼相机: `/camera/color/image_raw/compressed` (CompressedImage) — Orbbec Astra S 经 ROS1 `astra_camera` 驱动 + `ros1_bridge` 桥接进 ROS2 的彩色压缩流 (见下文「手眼相机 (Astra S)」)
+- 外部相机: `/eye_to_hand/image_raw/compressed` (CompressedImage) — `dual_camera_bridge` 读取 `/dev/RgbCam` (USB 摄像头) 发布的压缩彩色流
 
 **常见话题参考:**
 
 | 相机 | 话题 (压缩 / 原始) |
 |------|------|
-| USB 摄像头 (six_arm) | `/image_raw/compressed` · `/usb_cam/image_raw` |
-| Astra 深度相机 RGB (four_arm) | `/camera/rgb/image_raw/compressed` · `/camera/rgb/image_raw` |
+| 手眼 Astra S (经桥接) | `/camera/color/image_raw/compressed` · `/camera/color/image_raw` |
+| USB 摄像头 (外部) | `/eye_to_hand/image_raw/compressed` · `/eye_to_hand/image_raw` |
 | Astra 深度图 | `/camera/depth/image_raw/compressed` · `/camera/depth/image_raw` (mono8/16) |
 
 > 若你的真机有两个相机, 直接把两个 slot 的话题名改成对应话题即可。版本切换 (ROS1↔ROS2) 会自动重建订阅以适配消息类型字符串。无硬件测试时 mock 节点会发布移动彩条测试图 (`/image_raw/compressed` 需装 Pillow, 否则发 raw `/usb_cam/image_raw`)。
+
+### 手眼相机 (Astra S) — ROS1 驱动 + ros1_bridge 桥接
+
+手眼相机是装在机械臂末端的 **Orbbec Astra S** 深度相机。它**没有 UVC RGB 接口**, OpenCV/V4L2 读不了, 必须用 ROS1 `astra_camera` 驱动 (走 OpenNI2/libPS1080) 才能取 RGB。当前 ROS2 bringup 跑的是 foxy, 因此用 **ros1_bridge** 把 ROS1 的 Astra RGB 压缩流桥接进 ROS2:
+
+```
+Astra S --(OpenNI2)--> astra_camera(ROS1) --> /camera/color/image_raw
+     --> image_transport republish --> /camera/color/image_raw/compressed (ROS1)
+     --> ros1_bridge dynamic_bridge --bridge-all-1to2-topics
+     --> /camera/color/image_raw/compressed (ROS2)
+     --> rosbridge_websocket --> 浏览器前端 (手眼相机槽位)
+```
+
+**部署 (在小车上一次性配置):**
+```bash
+# 1. 安装 ros1_bridge (仅首次)
+sudo apt install ros-foxy-ros1-bridge
+# 2. 传输 ros2 工作空间到小车并构建 (脚本随包安装到 share/scripts/)
+#    (见 ros2/DEPLOY.md 的完整传输/构建流程, 需 --symlink-install)
+```
+
+**运行 (推荐: 集成进 bringup, 一条命令全起):**
+```bash
+# 小车上 — ROS2 主体 + 外部相机 + Astra 手眼相机, 一次启动
+ros2 launch wheeltec_sim2real_bridge bringup.launch.py astra_hand:=true echo_joint_states:=true
+# Ctrl+C 退出时, launch 会自动清理 Astra 链路的全部子进程 (roscore/astra/republish/bridge)
+```
+启动后浏览器前端「手眼相机」槽位 (默认话题 `/camera/color/image_raw/compressed`, CompressedImage) 即可实时显示 Astra 的 RGB 画面;「外部相机」槽位显示 `/eye_to_hand/...`。
+
+**运行 (备选: 手动独立启动, 不走 launch):**
+```bash
+# 先启动 ROS2 bringup (不含 astra_hand), 再单独跑脚本
+ros2 launch wheeltec_sim2real_bridge bringup.launch.py echo_joint_states:=true
+~/start_astra_hand_camera.sh start    # 或: ros2/src/wheeltec_sim2real_bridge/scripts/start_astra_hand_camera.sh start
+~/start_astra_hand_camera.sh status   # 查看状态 + ROS2 话题
+~/start_astra_hand_camera.sh stop     # 停止
+```
+
+> **Astra S 已知问题:** Astra S 在 Jetson USB2.0 上偶尔会卡死 (astra 日志报 `USB transfer timeout`), 软件复位无法恢复, 需**物理拔插 Astra 的 USB 线或重启小车**。启动脚本 (supervise 模式含一次 USB 软件复位 + astra 两次重试 + 彩色流健康检查) 失败时会明确提示并退出, 不影响 bringup 其它节点。日志在 `/tmp/astra_hand_{roscore,astra,republish,bridge}.log`。
+
+## 完整操作流程 (PC 传文件 → 小车启动 → 浏览器连接)
+
+以下从零开始, 把电脑端的 `ros2/` 工作空间部署到 WHEELTEC 小车并启动 sim2real 双向通信 + 双相机画面。
+
+### 前提
+
+- 小车 IP (本文以 `10.103.12.250` 为例, 用户 `wheeltec`, 密码 `dongguan`)
+- 小车已装 ROS2 Foxy + ROS1 Noetic (WHEELTEC Jetson 镜像自带)
+- 小车已装 ros1_bridge (首次部署时执行一次): `sudo apt install ros-foxy-ros1-bridge`
+- PC 已装 Node.js + npm
+
+### 步骤 1: PC 端传输 ros2/ 到小车 (覆盖旧文件)
+
+在 PC 项目根目录 `wheeltec-sim2real/` 下执行:
+
+```bash
+# 方式一: 只传改动的桥接包 (快, 推荐)
+scp -r ros2/src/wheeltec_sim2real_bridge wheeltec@10.103.12.250:~/ros2/src/
+
+# 方式二: 传整个 ros2/ 工作空间 (含 URDF 模型包 + 桥接包, 首次部署用)
+ssh wheeltec@10.103.12.250 "rm -rf ~/ros2"     # 先删旧工作空间, 避免嵌套
+scp -r ros2 wheeltec@10.103.12.250:~/           # ros2/ → ~/ros2/
+```
+
+> **避坑:** 如果 `~/ros2/` 已存在, 直接 `scp -r ros2 wheeltec@IP:~/ros2/` 会产生嵌套 `~/ros2/ros2/`, 导致 `colcon build` 报 `Duplicate package names`。要么先删 (`rm -rf ~/ros2`) 再传, 要么只传 `src/` 下的包目录。若已嵌套, 删掉即可: `rm -rf ~/ros2/ros2`。
+
+### 步骤 2: 小车端构建
+
+```bash
+ssh wheeltec@10.103.12.250
+cd ~/ros2
+colcon build --symlink-install --packages-select wheeltec_sim2real_bridge
+```
+
+> 首次构建或改了 URDF/STL 时, 用 `colcon build --symlink-install` (不带 `--packages-select`) 构建全部包。
+
+### 步骤 3: 小车端启动
+
+```bash
+# 首次需 source ROS2 环境 (或写入 ~/.bashrc 永久生效)
+source /opt/ros/foxy/setup.bash
+source ~/ros2/install/setup.bash
+
+# 永久生效 (可选, 以后开终端自动 source)
+echo 'source /opt/ros/foxy/setup.bash' >> ~/.bashrc
+echo 'source ~/ros2/install/setup.bash' >> ~/.bashrc
+
+# 启动! URDF/TF + 串口桥接 + rosbridge + 外部相机 + Astra 手眼相机, 一条命令
+ros2 launch wheeltec_sim2real_bridge bringup.launch.py astra_hand:=true echo_joint_states:=true
+```
+
+启动后终端应看到: `rosbridge_websocket` (端口 9090 就绪)、`serial_bridge` (串口已打开)、`dual_camera_bridge` (外部相机发布中)、`astra_hand_camera` (Astra 彩色流就绪)。`Ctrl+C` 退出时 launch 自动清理全部子进程。
+
+> **串口权限:** 若 serial_bridge 报串口打不开, 执行 `sudo chmod 666 /dev/wheeltec_controller`。
+>
+> **Astra 卡死:** 若 astra 日志报 `USB transfer timeout`, 物理拔插 Astra 的 USB 线后重新 launch。
+>
+> **端口占用:** 启动前确认没有旧的 bringup 在跑 (会占 9090 端口和串口), 有则先 `Ctrl+C` 停掉。
+
+### 步骤 4: PC 端启动前端并连接
+
+```bash
+cd wheeltec-sim2real
+npm install        # 首次
+npm run dev        # 浏览器打开 http://localhost:5173
+```
+
+浏览器内操作:
+
+1. 左上角「ROS 版本」→ 选 **ROS2**
+2. WebSocket 地址 → 填 `ws://10.103.12.250:9090`
+3. 点击「连接」→ 状态变绿
+4. 勾选「实时同步真机状态」→ 仿真模型镜像真机 `/joint_states` + `/odom`
+5. 勾选「将仿真指令发送至真机」→ 滑块/键盘/IK 指令下发 `voice_joint_states` + `cmd_vel`
+6. 底部「实时相机画面」→ 两个 slot 分别勾选「启用」:
+   - 手眼相机 (默认 `/camera/color/image_raw/compressed`, CompressedImage) → Astra RGB 画面
+   - 外部相机 (默认 `/eye_to_hand/image_raw/compressed`, CompressedImage) → USB 摄像头画面
+
+### 常用启动参数
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `astra_hand` | `false` | `true` 时拉起 Astra 手眼相机桥接链路 (ROS1 驱动 + ros1_bridge) |
+| `echo_joint_states` | `false` | `true` 时 serial_bridge 把 `voice_joint_states` 指令值回显到 `/joint_states` (无 MoveIt2 时让仿真有关节镜像) |
+| `mock` | `false` | `true` 时用 mock 节点替代串口 (无硬件联调) |
+
+```bash
+# 不带手眼相机 (仅外部相机)
+ros2 launch wheeltec_sim2real_bridge bringup.launch.py echo_joint_states:=true
+# 无硬件闭环测试
+ros2 launch wheeltec_sim2real_bridge bringup.launch.py mock:=true
+```
 
 ## LLM 智能体自主作业系统
 

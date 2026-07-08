@@ -4,12 +4,17 @@
     1. mini_4wd_six_arm display -> robot_state_publisher (URDF -> TF)
     2. serial_bridge (real robot serial) or mock_joint_states (no hardware)
     3. rosbridge_websocket -> browser roslibjs frontend
+    4. (可选) Astra S 手眼相机: ROS1 astra_camera + ros1_bridge -> ROS2
 
 参数:
     mock              (bool, 默认 False) True=无硬件 mock 节点; False=真机串口桥接
     rosbridge         (bool, 默认 True)  启动 rosbridge_websocket
-    cameras           (bool, 默认 True)  启动双 USB 摄像头桥接
+    cameras           (bool, 默认 True)  启动双 USB 摄像头桥接 (外部相机 /eye_to_hand)
     rgbd_detector     (bool, 默认 False) 启动 RGB-D 工业工具检测/标注节点
+    astra_hand        (bool, 默认 False) 启动 Astra S 手眼相机链路 (ROS1 驱动+ros1_bridge,
+                                          发布 /camera/color/image_raw/compressed 到 ROS2。
+                                          需先 sudo apt install ros-foxy-ros1-bridge。
+                                          Astra USB 卡死时需物理拔插, 详见 scripts/start_astra_hand_camera.sh)
     port              (int,  默认 9090)  rosbridge 端口
     jsp               (bool, 默认 False) 启动 joint_state_publisher
     use_rviz          (bool, 默认 False) 启动 rviz2
@@ -17,8 +22,10 @@
     params_file       (str)  serial_bridge 参数文件
 
 示例:
-    # 真机
+    # 真机 (仅外部相机)
     ros2 launch wheeltec_sim2real_bridge bringup.launch.py
+    # 真机 + Astra S 手眼相机 (外部+手眼双画面)
+    ros2 launch wheeltec_sim2real_bridge bringup.launch.py astra_hand:=true echo_joint_states:=true
     # 无硬件全链路测试 (含相机彩条)
     ros2 launch wheeltec_sim2real_bridge bringup.launch.py mock:=true
 """
@@ -26,7 +33,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (
@@ -62,6 +69,10 @@ def generate_launch_description():
     echo_arg = DeclareLaunchArgument('echo_joint_states', default_value='true')
     params_arg = DeclareLaunchArgument(
         'params_file', default_value=default_params)
+    # Astra S 手眼相机: ROS1 astra_camera + ros1_bridge 链路 (独立脚本 supervise 模式)
+    # 详见 scripts/start_astra_hand_camera.sh。需先 sudo apt install ros-foxy-ros1-bridge
+    astra_hand_arg = DeclareLaunchArgument('astra_hand', default_value='false')
+    astra_hand_script = os.path.join(bridge_share, 'scripts', 'start_astra_hand_camera.sh')
 
     # 1. URDF 模型 + robot_state_publisher (TF)
     arm_display = IncludeLaunchDescription(
@@ -142,12 +153,22 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('rgbd_detector')),
     )
 
+    # 6. Astra S 手眼相机链路 (ROS1 astra_camera + ros1_bridge -> ROS2)
+    #    独立脚本以前台 supervise 模式运行: roscore + astra + republish + dynamic_bridge
+    #    launch 退出 (Ctrl+C) 时脚本捕获信号清理全部子进程
+    astra_hand_proc = ExecuteProcess(
+        cmd=['bash', astra_hand_script, 'supervise'],
+        name='astra_hand_camera',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('astra_hand')),
+    )
+
     return LaunchDescription([
         mock_arg, rosbridge_arg, cameras_arg, rgbd_detector_arg,
         eye_in_hand_device_arg, eye_to_hand_device_arg,
         camera_width_arg, camera_height_arg, camera_fps_arg,
         rgbd_rgb_topic_arg, rgbd_depth_topic_arg, rgbd_camera_info_topic_arg,
-        port_arg, jsp_arg, rviz_arg, echo_arg, params_arg,
+        port_arg, jsp_arg, rviz_arg, echo_arg, params_arg, astra_hand_arg,
         arm_display, serial_node, mock_node, rosbridge_node, camera_node,
-        rgbd_detector_node,
+        rgbd_detector_node, astra_hand_proc,
     ])
