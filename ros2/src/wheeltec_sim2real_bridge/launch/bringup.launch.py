@@ -5,16 +5,21 @@
     2. serial_bridge (real robot serial) or mock_joint_states (no hardware)
     3. rosbridge_websocket -> browser roslibjs frontend
     4. (可选) Astra S 手眼相机: ROS1 astra_camera + ros1_bridge -> ROS2
+       (含 RGB+depth 流 + TF, 供前端显示和 rgbd_tool_detector 使用)
+    5. (可选) RGB-D 工业工具检测: rgbd_tool_detector (OpenCV, 输出世界坐标标注)
+    6. (可选) 手眼相机挂载 TF: link5 -> camera_link (静态, 供检测器世界坐标变换)
 
 参数:
     mock              (bool, 默认 False) True=无硬件 mock 节点; False=真机串口桥接
     rosbridge         (bool, 默认 True)  启动 rosbridge_websocket
     cameras           (bool, 默认 True)  启动双 USB 摄像头桥接 (外部相机 /eye_to_hand)
-    rgbd_detector     (bool, 默认 False) 启动 RGB-D 工业工具检测/标注节点
+    rgbd_detector     (bool, 默认 False) 启动 RGB-D 工业工具检测/标注节点 (需 astra_hand:=true)
     astra_hand        (bool, 默认 False) 启动 Astra S 手眼相机链路 (ROS1 驱动+ros1_bridge,
-                                          发布 /camera/color/image_raw/compressed 到 ROS2。
+                                          发布 RGB+depth+camera_info+TF 到 ROS2。
                                           需先 sudo apt install ros-foxy-ros1-bridge。
                                           Astra USB 卡死时需物理拔插, 详见 scripts/start_astra_hand_camera.sh)
+    hand_cam_x/y/z    (float, 默认 0.05/0/0.03) 手眼相机挂载位置 (link5→camera_link 静态 TF)
+    hand_cam_roll/pitch/yaw (float, 默认 0/-0.3/0) 手眼相机挂载姿态 (pitch 负值=向下看桌面)
     port              (int,  默认 9090)  rosbridge 端口
     jsp               (bool, 默认 False) 启动 joint_state_publisher
     use_rviz          (bool, 默认 False) 启动 rviz2
@@ -26,6 +31,8 @@
     ros2 launch wheeltec_sim2real_bridge bringup.launch.py
     # 真机 + Astra S 手眼相机 (外部+手眼双画面)
     ros2 launch wheeltec_sim2real_bridge bringup.launch.py astra_hand:=true echo_joint_states:=true
+    # 真机 + Astra + RGB-D 工具检测 (完整工业感知)
+    ros2 launch wheeltec_sim2real_bridge bringup.launch.py astra_hand:=true rgbd_detector:=true echo_joint_states:=true
     # 无硬件全链路测试 (含相机彩条)
     ros2 launch wheeltec_sim2real_bridge bringup.launch.py mock:=true
 """
@@ -58,11 +65,15 @@ def generate_launch_description():
     camera_height_arg = DeclareLaunchArgument('camera_height', default_value='480')
     camera_fps_arg = DeclareLaunchArgument('camera_fps', default_value='15.0')
     rgbd_rgb_topic_arg = DeclareLaunchArgument(
-        'rgbd_rgb_topic', default_value='/camera/rgb/image_raw')
+        'rgbd_rgb_topic', default_value='/camera/color/image_raw')
     rgbd_depth_topic_arg = DeclareLaunchArgument(
         'rgbd_depth_topic', default_value='/camera/depth/image_raw')
     rgbd_camera_info_topic_arg = DeclareLaunchArgument(
-        'rgbd_camera_info_topic', default_value='/camera/rgb/camera_info')
+        'rgbd_camera_info_topic', default_value='/camera/color/camera_info')
+    rgbd_depth_compressed_arg = DeclareLaunchArgument(
+        'rgbd_depth_compressed', default_value='true')
+    rgbd_rgb_compressed_arg = DeclareLaunchArgument(
+        'rgbd_rgb_compressed', default_value='true')
     port_arg = DeclareLaunchArgument('port', default_value='9090')
     jsp_arg = DeclareLaunchArgument('jsp', default_value='false')
     rviz_arg = DeclareLaunchArgument('use_rviz', default_value='false')
@@ -73,6 +84,16 @@ def generate_launch_description():
     # 详见 scripts/start_astra_hand_camera.sh。需先 sudo apt install ros-foxy-ros1-bridge
     astra_hand_arg = DeclareLaunchArgument('astra_hand', default_value='false')
     astra_hand_script = os.path.join(bridge_share, 'scripts', 'start_astra_hand_camera.sh')
+
+    # 手眼相机挂载位姿 (link5 → camera_link 的静态 TF, 用于 RGB-D 检测的世界坐标变换)
+    # 默认值: 相机在 link5 前方 5cm、上方 3cm, 向下倾斜 ~17° 看桌面
+    # 实际安装不同时通过 launch 参数覆盖, 或做手眼标定后更新
+    hand_cam_x_arg = DeclareLaunchArgument('hand_cam_x', default_value='0.05')
+    hand_cam_y_arg = DeclareLaunchArgument('hand_cam_y', default_value='0.0')
+    hand_cam_z_arg = DeclareLaunchArgument('hand_cam_z', default_value='0.03')
+    hand_cam_roll_arg = DeclareLaunchArgument('hand_cam_roll', default_value='0.0')
+    hand_cam_pitch_arg = DeclareLaunchArgument('hand_cam_pitch', default_value='-0.3')
+    hand_cam_yaw_arg = DeclareLaunchArgument('hand_cam_yaw', default_value='0.0')
 
     # 1. URDF 模型 + robot_state_publisher (TF)
     arm_display = IncludeLaunchDescription(
@@ -149,6 +170,8 @@ def generate_launch_description():
             'rgb_topic': LaunchConfiguration('rgbd_rgb_topic'),
             'depth_topic': LaunchConfiguration('rgbd_depth_topic'),
             'camera_info_topic': LaunchConfiguration('rgbd_camera_info_topic'),
+            'depth_compressed': LaunchConfiguration('rgbd_depth_compressed'),
+            'rgb_compressed': LaunchConfiguration('rgbd_rgb_compressed'),
         }],
         condition=IfCondition(LaunchConfiguration('rgbd_detector')),
     )
@@ -163,12 +186,36 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('astra_hand')),
     )
 
+    # 7. 手眼相机挂载 TF (link5 → camera_link)
+    #    连接 URDF TF 树 (base_link→...→link5) 与 Astra 自身 TF (camera_link→camera_color_optical_frame)
+    #    使 rgbd_tool_detector 能把相机坐标变换到 base_link 世界坐标
+    #    Foxy 的 static_transform_publisher 用位置参数: x y z yaw pitch roll frame_id child_frame_id
+    hand_camera_tf = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='hand_camera_mount_tf',
+        arguments=[
+            LaunchConfiguration('hand_cam_x'),
+            LaunchConfiguration('hand_cam_y'),
+            LaunchConfiguration('hand_cam_z'),
+            LaunchConfiguration('hand_cam_yaw'),
+            LaunchConfiguration('hand_cam_pitch'),
+            LaunchConfiguration('hand_cam_roll'),
+            'link5',
+            'camera_link',
+        ],
+        condition=IfCondition(LaunchConfiguration('astra_hand')),
+    )
+
     return LaunchDescription([
         mock_arg, rosbridge_arg, cameras_arg, rgbd_detector_arg,
         eye_in_hand_device_arg, eye_to_hand_device_arg,
         camera_width_arg, camera_height_arg, camera_fps_arg,
         rgbd_rgb_topic_arg, rgbd_depth_topic_arg, rgbd_camera_info_topic_arg,
+        rgbd_depth_compressed_arg, rgbd_rgb_compressed_arg,
         port_arg, jsp_arg, rviz_arg, echo_arg, params_arg, astra_hand_arg,
+        hand_cam_x_arg, hand_cam_y_arg, hand_cam_z_arg,
+        hand_cam_roll_arg, hand_cam_pitch_arg, hand_cam_yaw_arg,
         arm_display, serial_node, mock_node, rosbridge_node, camera_node,
-        rgbd_detector_node, astra_hand_proc,
+        rgbd_detector_node, astra_hand_proc, hand_camera_tf,
     ])

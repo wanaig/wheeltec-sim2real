@@ -527,6 +527,18 @@ export class AgentPanel {
     try {
       const payload = JSON.parse(data);
       const objects = Array.isArray(payload.objects) ? payload.objects : [];
+      // 注入真实检测结果到 MockAgent (供 perceive 工具使用, 优先于虚拟场景)
+      if (this._mockAgent && objects.length > 0) {
+        this._mockAgent.setRealAnnotations(
+          objects.filter(o => o.position_world_m || o.position_table_m).map(o => ({
+            class: o.class || 'unknown',
+            class_cn: o.class_cn,
+            confidence: o.confidence,
+            position_world_m: o.position_world_m || o.position_table_m,
+            bbox_xywh: o.bbox_xywh,
+          }))
+        );
+      }
       this._objects = objects.map(o => ({
         class: o.class_cn || o.class || 'unknown',
         conf: o.confidence,
@@ -534,6 +546,7 @@ export class AgentPanel {
           ? o.position_table_m.map(v => Number(v).toFixed(3)).join(', ')
           : '',
         bbox: Array.isArray(o.bbox_xywh) ? o.bbox_xywh.join(',') : '',
+        real: true,
       }));
       this._renderObjects();
     } catch (e) {
@@ -601,6 +614,7 @@ export class AgentPanel {
       conf: o.confidence,
       xyz: o.position ? [o.position.x, o.position.y, o.position.z].map(v => Number(v).toFixed(3)).join(', ') : '',
       reachable: o.reachable,
+      real: !!o.real,
     }));
     this._renderObjects();
   }
@@ -612,7 +626,8 @@ export class AgentPanel {
       const conf = o.conf != null ? ` conf=${Number(o.conf).toFixed(2)}` : '';
       const bbox = o.bbox ? ` bbox=[${o.bbox}]` : '';
       const reach = o.reachable === false ? ' <span style="color:#ffaa55">[远]</span>' : '';
-      return `<span class="ac-obj"><b>${o.class}</b> @[${o.xyz}]${conf}${bbox}${reach}</span>`;
+      const tag = o.real ? ' <span style="color:#4af">[RGB-D]</span>' : '';
+      return `<span class="ac-obj"><b>${o.class}</b> @[${o.xyz}]${conf}${bbox}${reach}${tag}</span>`;
     }).join('');
   }
 }

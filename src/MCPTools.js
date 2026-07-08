@@ -582,6 +582,7 @@ export class MCPToolExecutor {
           confidence: o.conf,
           distance_m: +dist.toFixed(3),
           reachable,
+          real: !!o.real,
         };
         if (!reachable) {
           obj.suggested_chassis = this._suggestChassisFor(new THREE.Vector3(o.xyz[0], o.xyz[1], o.xyz[2]));

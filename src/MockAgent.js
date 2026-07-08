@@ -43,6 +43,9 @@ export class MockAgent {
     this._injectFailure = false; // 模拟放置失败 (下次 _release 偏移)
     this._benchTopZ = 0.060;     // 台面顶高度 (供 DatasetGenerator 引用)
     this._binSlots = BIN_SLOTS;  // 料箱格子坐标 (供 MCPToolExecutor 引用)
+    this._realAnnotations = null;    // 真实 RGB-D 检测结果 (来自 /industrial_tools/annotations)
+    this._realAnnotationsTime = 0;   // 上次更新时间 (ms), 用于判断数据新鲜度
+    this._realAnnotationsTimeout = 5000; // 5s 内有效, 超时回退虚拟感知
 
     // 工具状态 (含 3D mesh), 初始用默认布局
     const toolDefs = generateLayout(DEFAULT_LAYOUT, this._benchTopZ);
@@ -341,7 +344,26 @@ export class MockAgent {
   }
 
   // ─── 感知 ───
+  // 真实 RGB-D 检测结果注入 (由 AgentPanel 从 /industrial_tools/annotations 接收后调用)
+  setRealAnnotations(objects) {
+    this._realAnnotations = objects;
+    this._realAnnotationsTime = performance.now();
+  }
+
   _perceive() {
+    // 优先使用真实 RGB-D 检测结果 (5s 内有效)
+    if (this._realAnnotations && this._realAnnotations.length >= 0 &&
+        performance.now() - this._realAnnotationsTime < this._realAnnotationsTimeout) {
+      return this._realAnnotations
+        .filter(o => o && o.position_world_m)
+        .map(o => ({
+          class: o.class || 'unknown',
+          xyz: [...o.position_world_m],
+          conf: o.confidence ?? 0.5,
+          real: true,
+        }));
+    }
+    // 回退: 虚拟场景感知
     return this.tools
       .filter(t => !t.grasped)
       .map(t => ({

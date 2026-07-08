@@ -269,16 +269,94 @@ npm run dev        # 浏览器打开 http://localhost:5173
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `astra_hand` | `false` | `true` 时拉起 Astra 手眼相机桥接链路 (ROS1 驱动 + ros1_bridge) |
+| `astra_hand` | `false` | `true` 时拉起 Astra 手眼相机桥接链路 (ROS1 驱动 + ros1_bridge, 含 RGB+depth 流 + TF) |
+| `rgbd_detector` | `false` | `true` 时启动 RGB-D 工业工具检测节点 (需 `astra_hand:=true` 提供 depth 流) |
 | `echo_joint_states` | `false` | `true` 时 serial_bridge 把 `voice_joint_states` 指令值回显到 `/joint_states` (无 MoveIt2 时让仿真有关节镜像) |
 | `mock` | `false` | `true` 时用 mock 节点替代串口 (无硬件联调) |
+| `hand_cam_x/y/z` | `0.05/0/0.03` | 手眼相机挂载位置 (link5→camera_link 静态 TF, 需 `astra_hand:=true`) |
+| `hand_cam_roll/pitch/yaw` | `0/-0.3/0` | 手眼相机挂载姿态 (pitch 负值=向下看桌面) |
 
 ```bash
 # 不带手眼相机 (仅外部相机)
 ros2 launch wheeltec_sim2real_bridge bringup.launch.py echo_joint_states:=true
+# 真机 + Astra 手眼 + RGB-D 工具检测 (完整工业感知)
+ros2 launch wheeltec_sim2real_bridge bringup.launch.py astra_hand:=true rgbd_detector:=true echo_joint_states:=true
 # 无硬件闭环测试
 ros2 launch wheeltec_sim2real_bridge bringup.launch.py mock:=true
 ```
+
+### RGB-D 工业工具检测 (桌面环境物体感知)
+
+基于手眼 Astra S 的 RGB-D 流,实时检测桌面工业工具/零件,标注类别与世界坐标,供 LLM 智能体感知使用。
+
+```
+Astra S (eye-in-hand)
+  │ RGB /camera/color/image_raw        ─┐
+  │ Depth /camera/depth/image_raw       │ ROS1→ROS2 (dynamic_bridge)
+  │ CameraInfo /camera/color/camera_info─┘
+  ▼
+rgbd_tool_detector (OpenCV 经典 CV: 深度ROI+Canny+HSV→轮廓→3D back-projection)
+  │ TF 变换: camera_color_optical_frame → base_link (世界坐标)
+  ▼
+/industrial_tools/annotations (JSON: class, confidence, position_world_m, bbox_xywh, ...)
+/industrial_tools/debug_image/compressed (带框+标签的调试图)
+  │ rosbridge_websocket
+  ▼
+浏览器 AgentPanel._onToolAnnotations → MockAgent.setRealAnnotations
+  │ perceive 工具自动切换: 有真实标注(5s内)→真实, 否则→虚拟场景
+  ▼
+LLM 智能体 perceive → 返回真实类别+世界坐标 → plan_arm_motion → grasp → ...
+```
+
+**启动:**
+```bash
+ros2 launch wheeltec_sim2real_bridge bringup.launch.py \
+  astra_hand:=true rgbd_detector:=true echo_joint_states:=true
+```
+
+**输出标注格式** (`/industrial_tools/annotations`, JSON):
+```json
+{
+  "stamp": 1234567890.0,
+  "frame_id": "camera_color_optical_frame",
+  "world_frame": "base_link",
+  "objects": [
+    {
+      "class": "screwdriver", "class_cn": "螺丝刀", "class_id": 0,
+      "confidence": 0.58,
+      "bbox_xywh": [120, 80, 45, 180],
+      "center_px": [142.5, 170.0],
+      "position_camera_m": [0.05, -0.02, 0.35],
+      "position_world_m": [0.30, 0.25, 0.07],
+      "position_table_m": [0.30, 0.25, 0.07],
+      "rotation_deg": 85.2, "area_px": 4200.0,
+      "aspect": 4.0, "circularity": 0.31
+    }
+  ]
+}
+```
+
+**手眼标定 TF 链:**
+```
+base_link → joint1 → ... → joint5 → link5
+  → [static TF] camera_link (挂载偏移, 可通过 launch 参数 hand_cam_x/y/z/roll/pitch/yaw 调整)
+  → [astra publish_tf] camera_color_frame → camera_color_optical_frame
+```
+> 默认挂载参数 (`x=0.05, z=0.03, pitch=-0.3`) 为近似值,实际安装不同时覆盖 launch 参数或做手眼标定后更新。`position_world_m` 为 `base_link` 坐标系 (与 Three.js 场景坐标系一致: X前/Y左/Z上, 单位米)。
+
+**检测类别** (5 类工业工具, 与 SceneLayouts / YOLO 标注一致):
+
+| class | class_cn | class_id | 特征 |
+|-------|---------|----------|------|
+| screwdriver | 螺丝刀 | 0 | 长条形 + 彩色手柄 (HSV sat>45, hue 95-135) |
+| wrench | 扳手 | 1 | 中等长宽比 + 低填充率 |
+| nut | 螺母 | 2 | 高圆度 + 小面积 |
+| roller | 滚柱 | 3 | 长条形 + 低饱和度金属色 |
+| screw | 螺丝 | 4 | 小面积 + 中等圆度 |
+
+> **分类方法**: 当前为 OpenCV 几何+颜色启发式 (circularity/aspect/HSV), 置信度 0.45–0.62。后续可替换为 YOLO 推理 (DatasetGenerator 已能生成训练集)。`rgbd_tool_detector.py` 的 `_classify_contour` 方法为替换入口。
+
+> **前端显示**: AgentPanel「检测物体」区域, 真实检测结果标注 `[RGB-D]` 标签, 虚拟场景感知无标签。perceive 工具返回结果中 `real: true` 表示来自 RGB-D。
 
 ## LLM 智能体自主作业系统
 
@@ -297,7 +375,7 @@ ros2 launch wheeltec_sim2real_bridge bringup.launch.py mock:=true
 
 | 工具 | 功能 |
 |------|------|
-| `perceive` | 感知场景中所有可见工具/零件,返回类别、世界坐标、距离、可达性;不可达时附带 `suggested_chassis` |
+| `perceive` | 感知场景中所有可见工具/零件,返回类别、世界坐标、距离、可达性;不可达时附带 `suggested_chassis`。**数据源自动切换**:有真实 RGB-D 检测结果 (5s 内, `/industrial_tools/annotations`) 时用真实数据,否则回退虚拟场景 |
 | `get_scene_info` | 返回双工作台位置、料箱格子坐标、臂展范围、碰撞盒、安全高度 |
 | `get_robot_state` | 返回底盘位姿、臂关节角、夹爪状态、TCP 世界坐标 |
 | `move_base` | 底盘导航到世界坐标(x,y,yaw),先自动收回机械臂到安全高度再 A* 路径规划避障行驶 |

@@ -22,8 +22,11 @@ from typing import Optional
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 from std_msgs.msg import String
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
 
 try:
     import cv2
@@ -58,24 +61,28 @@ class RgbdToolDetector(Node):
     def __init__(self) -> None:
         super().__init__('rgbd_tool_detector')
 
-        self.declare_parameter('rgb_topic', '/camera/rgb/image_raw')
+        self.declare_parameter('rgb_topic', '/camera/color/image_raw')
         self.declare_parameter('depth_topic', '/camera/depth/image_raw')
-        self.declare_parameter('camera_info_topic', '/camera/rgb/camera_info')
+        self.declare_parameter('camera_info_topic', '/camera/color/camera_info')
         self.declare_parameter('annotations_topic', '/industrial_tools/annotations')
         self.declare_parameter('debug_image_topic', '/industrial_tools/debug_image/compressed')
         self.declare_parameter('frame_id', 'rgbd_camera')
+        self.declare_parameter('world_frame', 'base_link')
+        self.declare_parameter('depth_compressed', True)
+        self.declare_parameter('rgb_compressed', True)
         self.declare_parameter('detect_hz', 5.0)
         self.declare_parameter('min_area_px', 180.0)
         self.declare_parameter('max_area_px', 60000.0)
         self.declare_parameter('min_depth_m', 0.12)
         self.declare_parameter('max_depth_m', 2.00)
-        self.declare_parameter('depth_sync_tolerance_s', 0.25)
+        self.declare_parameter('depth_sync_tolerance_s', 5.0)
         self.declare_parameter('jpeg_quality', 70)
 
         self.rgb_topic = str(self.get_parameter('rgb_topic').value)
         self.depth_topic = str(self.get_parameter('depth_topic').value)
         self.info_topic = str(self.get_parameter('camera_info_topic').value)
         self.frame_id = str(self.get_parameter('frame_id').value)
+        self.world_frame = str(self.get_parameter('world_frame').value)
         self.min_area = float(self.get_parameter('min_area_px').value)
         self.max_area = float(self.get_parameter('max_area_px').value)
         self.min_depth = float(self.get_parameter('min_depth_m').value)
@@ -88,8 +95,20 @@ class RgbdToolDetector(Node):
         self._info_msg: Optional[CameraInfo] = None
         self._last_warn = 0.0
 
-        self.create_subscription(Image, self.rgb_topic, self._on_rgb, 10)
-        self.create_subscription(Image, self.depth_topic, self._on_depth, 10)
+        self.rgb_compressed = bool(self.get_parameter('rgb_compressed').value)
+        if self.rgb_compressed:
+            self.create_subscription(CompressedImage, self.rgb_topic + '/compressed', self._on_rgb, 10)
+        else:
+            self.create_subscription(Image, self.rgb_topic, self._on_rgb, 10)
+
+        self.depth_compressed = bool(self.get_parameter('depth_compressed').value)
+        if self.depth_compressed:
+            depth_sub_topic = self.depth_topic + '/compressed'
+            self.create_subscription(CompressedImage, depth_sub_topic, self._on_depth, 10)
+        else:
+            depth_sub_topic = self.depth_topic
+            self.create_subscription(Image, self.depth_topic, self._on_depth, 10)
+
         self.create_subscription(CameraInfo, self.info_topic, self._on_info, 10)
 
         self.annotations_pub = self.create_publisher(
@@ -97,12 +116,52 @@ class RgbdToolDetector(Node):
         self.debug_pub = self.create_publisher(
             CompressedImage, str(self.get_parameter('debug_image_topic').value), 5)
 
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
+        self._tf_available = False
+
         period = 1.0 / max(0.5, float(self.get_parameter('detect_hz').value))
         self.create_timer(period, self._tick)
 
         self.get_logger().info(
-            'RGB-D tool detector started: rgb=%s depth=%s info=%s' % (
-                self.rgb_topic, self.depth_topic, self.info_topic))
+            'RGB-D tool detector started: rgb=%s%s depth=%s%s info=%s world_frame=%s' % (
+                self.rgb_topic, '/compressed' if self.rgb_compressed else '',
+                self.depth_topic, '/compressed' if self.depth_compressed else '',
+                self.info_topic, self.world_frame))
+
+    def _transform_to_world(self, x, y, z, camera_frame):
+        """Transform a 3D point from camera optical frame to self.world_frame via TF.
+
+        Returns [x, y, z] in world frame, or None if TF is unavailable.
+        """
+        try:
+            tf = self._tf_buffer.lookup_transform(
+                self.world_frame, camera_frame, Time())
+        except Exception:
+            if not self._tf_available:
+                self._warn_throttled(
+                    'TF %s -> %s not available, using camera-frame coords' % (
+                        camera_frame, self.world_frame))
+            return None
+        self._tf_available = True
+
+        t = tf.transform.translation
+        q = tf.transform.rotation
+        qx, qy, qz, qw = q.x, q.y, q.z, q.w
+        r11 = 1 - 2 * (qy * qy + qz * qz)
+        r12 = 2 * (qx * qy - qz * qw)
+        r13 = 2 * (qx * qz + qy * qw)
+        r21 = 2 * (qx * qy + qz * qw)
+        r22 = 1 - 2 * (qx * qx + qz * qz)
+        r23 = 2 * (qy * qz - qx * qw)
+        r31 = 2 * (qx * qz - qy * qw)
+        r32 = 2 * (qy * qz + qx * qw)
+        r33 = 1 - 2 * (qx * qx + qy * qy)
+
+        wx = r11 * x + r12 * y + r13 * z + t.x
+        wy = r21 * x + r22 * y + r23 * z + t.y
+        wz = r31 * x + r32 * y + r33 * z + t.z
+        return [round(float(wx), 4), round(float(wy), 4), round(float(wz), 4)]
 
     def _on_rgb(self, msg: Image) -> None:
         self._rgb_msg = msg
@@ -119,7 +178,16 @@ class RgbdToolDetector(Node):
             self.get_logger().warn(text)
             self._last_warn = now
 
-    def _image_to_cv(self, msg: Image):
+    def _image_to_cv(self, msg):
+        # CompressedImage (JPEG from image_transport republish)
+        if isinstance(msg, CompressedImage):
+            buf = np.frombuffer(msg.data, dtype=np.uint8)
+            img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            if img is None:
+                raise ValueError('failed to decode compressed RGB image')
+            return img
+
+        # Raw Image
         h, w = int(msg.height), int(msg.width)
         enc = (msg.encoding or '').lower()
         data = np.frombuffer(msg.data, dtype=np.uint8)
@@ -139,7 +207,18 @@ class RgbdToolDetector(Node):
 
         raise ValueError('unsupported RGB encoding: %s' % msg.encoding)
 
-    def _depth_to_meters(self, msg: Image):
+    def _depth_to_meters(self, msg):
+        # CompressedImage (PNG-encoded depth from image_transport republish)
+        if isinstance(msg, CompressedImage):
+            buf = np.frombuffer(msg.data, dtype=np.uint8)
+            img = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
+            if img is None:
+                raise ValueError('failed to decode compressed depth image')
+            if img.dtype == np.uint16:
+                return img.astype(np.float32) * 0.001  # mm → meters
+            return img.astype(np.float32)
+
+        # Raw Image
         h, w = int(msg.height), int(msg.width)
         enc = (msg.encoding or '').lower()
         if enc in ('16uc1', 'mono16'):
@@ -276,6 +355,13 @@ class RgbdToolDetector(Node):
             cls, conf, angle, aspect, circularity = self._classify_contour(
                 contour, (x, y, bw, bh), depth_m, bgr)
 
+            cam_frame = self._rgb_msg.header.frame_id or self.frame_id
+            world_pos = self._transform_to_world(x_cam, y_cam, z_cam, cam_frame)
+            if world_pos is None:
+                table_pos = [round(x_cam, 4), round(y_cam, 4), round(z_cam, 4)]
+            else:
+                table_pos = world_pos
+
             obj = {
                 'id': len(objects),
                 'class': cls,
@@ -285,7 +371,8 @@ class RgbdToolDetector(Node):
                 'bbox_xywh': [int(x), int(y), int(bw), int(bh)],
                 'center_px': [round(u, 1), round(v, 1)],
                 'position_camera_m': [round(x_cam, 4), round(y_cam, 4), round(z_cam, 4)],
-                'position_table_m': [round(x_cam, 4), round(y_cam, 4), round(z_cam, 4)],
+                'position_world_m': world_pos,
+                'position_table_m': table_pos,
                 'rotation_deg': round(angle, 2),
                 'area_px': round(float(area), 1),
                 'aspect': round(aspect, 3),
@@ -302,6 +389,7 @@ class RgbdToolDetector(Node):
         payload = {
             'stamp': _stamp_to_float(self._rgb_msg.header.stamp),
             'frame_id': self._rgb_msg.header.frame_id or self.frame_id,
+            'world_frame': self.world_frame if self._tf_available else None,
             'source': {'rgb': self.rgb_topic, 'depth': self.depth_topic},
             'objects': objects,
         }

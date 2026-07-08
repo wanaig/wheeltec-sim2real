@@ -49,7 +49,7 @@ is_running() {
 # 清理残留进程 (bridge 挂了但 astra/republish 还活着的情况)
 _cleanup() {
   pkill -f 'dynamic_bridge'              2>/dev/null
-  pkill -f 'republish raw in:=/camera/color' 2>/dev/null
+  pkill -f 'republish raw in:=/camera/color'  2>/dev/null
   pkill -f 'astra_camera_node'           2>/dev/null
   pkill -f 'roslaunch astra_camera astra.launch' 2>/dev/null
   pkill -x rosmaster                     2>/dev/null
@@ -98,7 +98,7 @@ start() {
     for _ in $(seq 1 10); do pgrep -x rosmaster >/dev/null 2>&1 && break; sleep 1; done
   fi
 
-  # 2. astra 相机 (仅彩色流, 关闭 depth/ir/点云/TF 以省 USB 带宽 + 避免 TF 污染)
+  # 2. astra 相机 (仅彩色流, 关闭 depth/ir/点云/TF)
   nohup roslaunch astra_camera astra.launch \
     enable_color:=true enable_ir:=false enable_depth:=false \
     enable_point_cloud:=false publish_tf:=false \
@@ -214,7 +214,7 @@ supervise() {
     exit 1
   fi
 
-  # 3. republish
+  # 3. republish (color raw -> compressed)
   nohup rosrun image_transport republish \
     raw in:=/camera/color/image_raw compressed out:=/camera/color/image_raw \
     >"$LOGDIR/astra_hand_republish.log" 2>&1 &
