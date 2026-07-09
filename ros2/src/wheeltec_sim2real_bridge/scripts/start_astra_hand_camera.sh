@@ -5,13 +5,16 @@
 # 把 Astra 的 RGB 压缩流桥接到 ROS2, 供前端"手眼相机"槽位实时显示。
 #
 # 链路:
-#   Astra S --(OpenNI2)--> astra_camera(ROS1) --> /camera/color/image_raw
+#   Astra S --(OpenNI2)--> astra_camera(ROS1) --> /camera/color/image_raw + /camera/depth/image_raw
 #        --> image_transport republish --> /camera/color/image_raw/compressed (ROS1)
+#        --> image_transport republish --> /camera/depth/image_raw/compressed  (ROS1, PNG 16-bit)
 #        --> ros1_bridge dynamic_bridge --bridge-all-1to2-topics
-#        --> /camera/color/image_raw/compressed (ROS2)
+#        --> /camera/color/image_raw/compressed + /camera/depth/image_raw/compressed + camera_info (ROS2)
 #        --> rosbridge_websocket --> 浏览器前端 (CompressedImage, jpeg)
+#        --> rgbd_tool_detector (YOLO + RGB-D, 输出世界坐标标注 + 调试图)
 #
 # 前端订阅话题: /camera/color/image_raw/compressed  (消息类型 CompressedImage)
+# 检测器订阅:   /camera/color/image_raw/compressed + /camera/depth/image_raw/compressed + /camera/color/camera_info
 #
 # 用法:
 #   ./start_astra_hand_camera.sh start     # 后台启动 (默认, 手动运行)
@@ -29,6 +32,8 @@
 #   Astra S 在 Jetson USB2.0 上偶尔会卡死 (astra 日志报 "USB transfer timeout"),
 #   此时软件复位也无法恢复, 需要物理拔插 Astra 的 USB 线或重启小车。
 #   本脚本启动时会先做一次 USB 软件复位 + 彩色流健康检查; 若失败会明确提示。
+#   注意: color+depth 同时开启时 USB 功耗增大, 电池电量低时可能导致机械臂串口
+#   干扰 (臂抽搐)。请确保电池电量充足后再启用 depth。
 # =============================================================================
 
 
@@ -50,11 +55,13 @@ is_running() {
 _cleanup() {
   pkill -f 'dynamic_bridge'              2>/dev/null
   pkill -f 'republish raw in:=/camera/color'  2>/dev/null
+  pkill -f 'republish raw in:=/camera/depth'  2>/dev/null
   pkill -f 'astra_camera_node'           2>/dev/null
   pkill -f 'roslaunch astra_camera astra.launch' 2>/dev/null
   pkill -x rosmaster                     2>/dev/null
   pkill -x roscore                       2>/dev/null
   rm -f "$PIDFILE"
+  rm -f /dev/shm/astra_device.lock       2>/dev/null
   sleep 1
 }
 
@@ -98,10 +105,10 @@ start() {
     for _ in $(seq 1 10); do pgrep -x rosmaster >/dev/null 2>&1 && break; sleep 1; done
   fi
 
-  # 2. astra 相机 (仅彩色流, 关闭 depth/ir/点云/TF)
+  # 2. astra 相机 (彩色 + 深度, 关闭 ir/点云/TF)
   nohup roslaunch astra_camera astra.launch \
-    enable_color:=true enable_ir:=false enable_depth:=false \
-    enable_point_cloud:=false publish_tf:=false \
+    enable_color:=true enable_ir:=false enable_depth:=true \
+    enable_point_cloud:=false publish_tf:=true \
     >"$LOGDIR/astra_hand_astra.log" 2>&1 &
   ASTRA_PID=$!
   log "astra 已启动 (pid $ASTRA_PID), 等待彩色流出图 (最多 25s)..."
@@ -123,11 +130,17 @@ start() {
     exit 1
   fi
 
-  # 3. image_transport republish: raw -> compressed
+  # 3. image_transport republish: color raw -> compressed
   nohup rosrun image_transport republish \
     raw in:=/camera/color/image_raw compressed out:=/camera/color/image_raw \
     >"$LOGDIR/astra_hand_republish.log" 2>&1 &
-  log "republish 已启动 (raw -> compressed)"
+  log "republish 已启动 (color raw -> compressed)"
+
+  # 3b. image_transport republish: depth raw -> compressed (PNG 16-bit)
+  nohup rosrun image_transport republish \
+    raw in:=/camera/depth/image_raw compressed out:=/camera/depth/image_raw \
+    >"$LOGDIR/astra_hand_republish_depth.log" 2>&1 &
+  log "republish 已启动 (depth raw -> compressed)"
   sleep 2
 
   # 4. ros1_bridge: ROS1 -> ROS2 (桥接所有 ROS1 话题, 仅在有 ROS2 订阅者时才实际传数据)
@@ -141,7 +154,8 @@ start() {
   log "ros1_bridge 已启动 (pid $BRIDGE_PID)"
 
   log "完成。前端手眼相机槽位订阅: /camera/color/image_raw/compressed"
-  log "日志: $LOGDIR/astra_hand_{roscore,astra,republish,bridge}.log"
+  log "RGB-D 检测器订阅: /camera/color/image_raw/compressed + /camera/depth/image_raw/compressed"
+  log "日志: $LOGDIR/astra_hand_{roscore,astra,republish,republish_depth,bridge}.log"
 }
 
 stop() {
@@ -162,19 +176,22 @@ supervise() {
   # shellcheck disable=SC1090,SC1091
   source "$WS"
   export ROS_MASTER_URI=http://localhost:11311
-  ROSCORE_PID=""; ASTRA_PID=""; REPUB_PID=""; BRIDGE_PID=""
+  ROSCORE_PID=""; ASTRA_PID=""; REPUB_PID=""; DEPTH_REPUB_PID=""; BRIDGE_PID=""
 
   _kill_supervise_children() {
     [ -n "$BRIDGE_PID" ]  && kill "$BRIDGE_PID"  2>/dev/null
+    [ -n "$DEPTH_REPUB_PID" ] && kill "$DEPTH_REPUB_PID" 2>/dev/null
     [ -n "$REPUB_PID" ]   && kill "$REPUB_PID"   2>/dev/null
     [ -n "$ASTRA_PID" ]   && kill "$ASTRA_PID"   2>/dev/null
     [ -n "$ROSCORE_PID" ] && kill "$ROSCORE_PID" 2>/dev/null
     pkill -9 -f dynamic_bridge 2>/dev/null
     pkill -9 -f 'republish raw in:=/camera/color' 2>/dev/null
+    pkill -9 -f 'republish raw in:=/camera/depth' 2>/dev/null
     pkill -9 -f astra_camera_node 2>/dev/null
     pkill -9 -f 'roslaunch astra' 2>/dev/null
     pkill -x rosmaster 2>/dev/null; pkill -x roscore 2>/dev/null
     rm -f "$PIDFILE"
+    rm -f /dev/shm/astra_device.lock 2>/dev/null
   }
   trap '_kill_supervise_children; exit 0' INT TERM
 
@@ -191,10 +208,12 @@ supervise() {
     if [ "$attempt" = "2" ]; then
       log "(supervise) 首次未出图, 重试 astra..."
       pkill -9 -f astra_camera_node 2>/dev/null; pkill -9 -f 'roslaunch astra' 2>/dev/null; sleep 2
+      rm -f /dev/shm/astra_device.lock 2>/dev/null
     fi
     nohup roslaunch astra_camera astra.launch \
-      enable_color:=true enable_ir:=false enable_depth:=false \
+      enable_color:=true enable_ir:=false enable_depth:=true \
       enable_point_cloud:=false publish_tf:=false \
+      color_width:=320 color_height:=240 \
       >"$LOGDIR/astra_hand_astra.log" 2>&1 &
     ASTRA_PID=$!
     log "(supervise) astra 启动 (pid $ASTRA_PID), 等待彩色流 (第 $attempt 次, 最多 25s)..."
@@ -219,6 +238,18 @@ supervise() {
     raw in:=/camera/color/image_raw compressed out:=/camera/color/image_raw \
     >"$LOGDIR/astra_hand_republish.log" 2>&1 &
   REPUB_PID=$!
+
+  # 3b. republish (depth raw -> compressed, PNG 16-bit)
+  nohup rosrun image_transport republish \
+    raw in:=/camera/depth/image_raw compressed out:=/camera/depth/image_raw \
+    >"$LOGDIR/astra_hand_republish_depth.log" 2>&1 &
+  DEPTH_REPUB_PID=$!
+  sleep 2
+
+  # 3c. 触发 republish 开始发布 compressed (republish 懒订阅: 无人订阅则不发布)
+  #     dynamic_bridge 启动时需发现 compressed topic 才能桥接到 ROS2
+  timeout 5 rostopic echo /camera/color/image_raw/compressed --noarr >/dev/null 2>&1 &
+  timeout 5 rostopic echo /camera/depth/image_raw/compressed --noarr >/dev/null 2>&1 &
   sleep 2
 
   # 4. ros1_bridge
@@ -231,7 +262,8 @@ supervise() {
   echo "$BRIDGE_PID" > "$PIDFILE"
   log "(supervise) 链路就绪, 前台阻塞运行 (bridge pid $BRIDGE_PID)。"
   log "   前端手眼相机槽位订阅: /camera/color/image_raw/compressed"
-  log "   日志: $LOGDIR/astra_hand_{roscore,astra,republish,bridge}.log"
+  log "   RGB-D 检测器订阅: /camera/color/image_raw/compressed + /camera/depth/image_raw/compressed"
+  log "   日志: $LOGDIR/astra_hand_{roscore,astra,republish,republish_depth,bridge}.log"
 
   # 阻塞, 直到 bridge 退出
   wait "$BRIDGE_PID" 2>/dev/null

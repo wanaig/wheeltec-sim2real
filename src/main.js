@@ -12,7 +12,7 @@ import { CameraView } from './CameraView.js';
 import { UIController } from './UIController.js';
 import { AgentPanel } from './AgentPanel.js';
 import { MockAgent } from './MockAgent.js';
-import { DatasetGenerator } from './DatasetGenerator.js';
+import { RealEnvView } from './RealEnvView.js';
 import { MCPToolExecutor, MCP_TOOLS } from './MCPTools.js';
 import { LangGraphAgent } from './LangGraphAgent.js';
 // 原生 fetch + function-calling 实现, 保留作 fallback (注释切换即可):
@@ -71,9 +71,8 @@ async function main() {
   const mockAgent = new MockAgent(robot, ik, scene, agentPanel, ros, chassis);
   agentPanel.setMockAgent(mockAgent);
 
-  // 7.7 数据集生成器
-  const datasetGen = new DatasetGenerator(scene, mockAgent);
-  agentPanel.setDatasetGenerator(datasetGen);
+  // 7.7b 真实环境 RGB-D 点云 (真实画面 → 3D 场景)
+  const realEnv = new RealEnvView(scene, robot, ros);
 
   // 7.8 MCP 工具执行器 (大模型 function calling 的后端)
   const mcpExecutor = new MCPToolExecutor({
@@ -110,6 +109,7 @@ async function main() {
     armKey.update();
     robot.update();
     mockAgent.update();  // 被抓的工具跟随 TCP
+    realEnv.update();    // 真实 RGB-D 点云 → 3D 场景
     ui.tick();
     // 持续发布 /joint_states (~10Hz), 覆盖 MoveIt joint_state_publisher 的零值
     // joint_state_publisher 本身 10Hz, 喂更快无意义, 降低 WebSocket 负载

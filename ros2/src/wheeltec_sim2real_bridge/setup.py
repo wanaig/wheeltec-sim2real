@@ -17,6 +17,7 @@ setup(
         ]),
         ('share/' + package_name + '/config', ['config/params.yaml']),
         ('share/' + package_name + '/scripts', ['scripts/start_astra_hand_camera.sh']),
+        ('share/' + package_name + '/models', ['models/yolov8n.pt']),
     ],
     install_requires=['setuptools', 'pyserial'],
     zip_safe=True,

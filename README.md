@@ -269,8 +269,12 @@ npm run dev        # 浏览器打开 http://localhost:5173
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `astra_hand` | `false` | `true` 时拉起 Astra 手眼相机桥接链路 (ROS1 驱动 + ros1_bridge, 含 RGB+depth 流 + TF) |
-| `rgbd_detector` | `false` | `true` 时启动 RGB-D 工业工具检测节点 (需 `astra_hand:=true` 提供 depth 流) |
+| `astra_hand` | `false` | `true` 时拉起 Astra 手眼相机桥接链路 (ROS1 驱动 + ros1_bridge, 含 RGB+depth 流) |
+| `rgbd_detector` | `false` | `true` 时启动 YOLO+RGB-D 工业检测节点 (需 `astra_hand:=true` 提供 depth 流) |
+| `yolo_model` | `yolov8n.pt` | YOLO 模型文件 (COCO 预训练)。需 `pip install ultralytics`; 未安装时自动回退到 `yolov5s.pt` |
+| `yolo_conf` | `0.45` | YOLO 置信度阈值 |
+| `yolo_device` | `cuda:0` | YOLO 推理设备 (`cuda:0` / `cpu`) |
+| `yolo_imgsz` | `640` | YOLO 推理图像尺寸 |
 | `echo_joint_states` | `false` | `true` 时 serial_bridge 把 `voice_joint_states` 指令值回显到 `/joint_states` (无 MoveIt2 时让仿真有关节镜像) |
 | `mock` | `false` | `true` 时用 mock 节点替代串口 (无硬件联调) |
 | `hand_cam_x/y/z` | `0.05/0/0.03` | 手眼相机挂载位置 (link5→camera_link 静态 TF, 需 `astra_hand:=true`) |
@@ -279,40 +283,74 @@ npm run dev        # 浏览器打开 http://localhost:5173
 ```bash
 # 不带手眼相机 (仅外部相机)
 ros2 launch wheeltec_sim2real_bridge bringup.launch.py echo_joint_states:=true
-# 真机 + Astra 手眼 + RGB-D 工具检测 (完整工业感知)
+# 真机 + Astra 手眼 + YOLO RGB-D 工业检测 (完整工业感知)
 ros2 launch wheeltec_sim2real_bridge bringup.launch.py astra_hand:=true rgbd_detector:=true echo_joint_states:=true
 # 无硬件闭环测试
 ros2 launch wheeltec_sim2real_bridge bringup.launch.py mock:=true
 ```
 
-### RGB-D 工业工具检测 (桌面环境物体感知)
+### YOLO + RGB-D 工业检测与 sim2real 数字孪生
 
-基于手眼 Astra S 的 RGB-D 流,实时检测桌面工业工具/零件,标注类别与世界坐标,供 LLM 智能体感知使用。
+基于手眼 Astra S 的 RGB-D 流 + YOLO 目标检测,实时检测桌面物体,标注类别与世界坐标,并**同步真实画面为 3D 彩色点云**到 Three.js 场景,实现 sim2real 数字孪生闭环。
+
+**架构: ROS2 + OpenCV + YOLO + RGB-D → Three.js 彩色点云数字孪生**
 
 ```
 Astra S (eye-in-hand)
-  │ RGB /camera/color/image_raw        ─┐
-  │ Depth /camera/depth/image_raw       │ ROS1→ROS2 (dynamic_bridge)
-  │ CameraInfo /camera/color/camera_info─┘
+  │ RGB /camera/color/image_raw/compressed        ─┐
+  │ Depth /camera/depth/image_raw/compressed       │ ROS1→ROS2 (dynamic_bridge)
+  │ CameraInfo /camera/color/camera_info           ─┘
   ▼
-rgbd_tool_detector (OpenCV 经典 CV: 深度ROI+Canny+HSV→轮廓→3D back-projection)
+rgbd_tool_detector (YOLO 推理: bounding box + class + confidence
+                     → depth ROI 中值 → 3D 坐标 → TF 变换到 base_link)
+  │ YOLO 后端自动检测: ultralytics(YOLOv8) 或 torch.hub(YOLOv5, 本地 ~/yolov5-pytorch)
   │ TF 变换: camera_color_optical_frame → base_link (世界坐标)
   ▼
-/industrial_tools/annotations (JSON: class, confidence, position_world_m, bbox_xywh, ...)
-/industrial_tools/debug_image/compressed (带框+标签的调试图)
+/industrial_tools/annotations (JSON: class, confidence, position_world_m, depth_m, bbox_xywh, ...)
+/industrial_tools/debug_image/compressed (带 YOLO 框+标签+世界坐标的调试图)
+/industrial_tools/depth_viz/compressed (8-bit 深度 JPEG, 供浏览器生成点云)
   │ rosbridge_websocket
   ▼
-浏览器 AgentPanel._onToolAnnotations → MockAgent.setRealAnnotations
-  │ perceive 工具自动切换: 有真实标注(5s内)→真实, 否则→虚拟场景
+浏览器 (两条并行链路):
+  ┌─────────────────────────────────────────────────────────────────┐
+  │ 链路1: YOLO 检测 → 物体级数字孪生                                │
+  │  AgentPanel._onToolAnnotations → MockAgent.setRealAnnotations   │
+  │  → _syncRealTools(): 为每个真实检测创建 3D Mesh → this.tools    │
+  │  → grasp/release/verify 全链路打通                              │
+  │  → 绿色标签 = 真实检测, 黄色标签 = 虚拟布局                     │
+  │  → 5s 无新检测 → 自动恢复虚拟布局                               │
+  ├─────────────────────────────────────────────────────────────────┤
+  │ 链路2: RGB-D 点云 → 像素级数字孪生                              │
+  │  RealEnvView: 订阅 color JPEG + depth JPEG + camera_info        │
+  │  → 逐像素 back-project (深度→3D坐标, 内参 fx/fy/cx/cy)         │
+  │  → ~19000 彩色点 (降采样 1/16)                                  │
+  │  → RobotModel.getCameraOpticalPose() FK → 世界坐标系定位        │
+  │  → THREE.Points 实时渲染 (真实环境点云 = 3D 场景中的真实世界)   │
+  └─────────────────────────────────────────────────────────────────┘
   ▼
-LLM 智能体 perceive → 返回真实类别+世界坐标 → plan_arm_motion → grasp → ...
+Three.js 3D 场景 = 真实环境数字孪生:
+  - 机器人 URDF 模型 (关节角 = 真机实时镜像)
+  - 真实 RGB-D 彩色点云 (桌面物体的真实 3D 外观)
+  - YOLO 检测物体 3D Mesh (类别+世界坐标, 可抓取)
+  - 虚拟工作台/料箱 (工业场景布局)
+  ▼
+LLM 智能体自主作业: perceive (真实类别+坐标) → plan_arm_motion (IK) → grasp → release → verify
 ```
 
 **启动:**
 ```bash
 ros2 launch wheeltec_sim2real_bridge bringup.launch.py \
   astra_hand:=true rgbd_detector:=true echo_joint_states:=true
+# 自定义 YOLO 模型/参数:
+ros2 launch wheeltec_sim2real_bridge bringup.launch.py \
+  astra_hand:=true rgbd_detector:=true \
+  yolo_model:=yolov8n.pt yolo_conf:=0.5 yolo_device:=cuda:0
 ```
+
+**YOLO 后端 (自动检测):**
+- **ultralytics (YOLOv8)**: `pip install ultralytics` 后自动使用,默认模型 `yolov8n.pt`
+- **YOLOv5 (torch.hub)**: 未安装 ultralytics 时自动回退,从 `~/yolov5-pytorch/` 本地加载 `yolov5s.pt`
+- 两者都使用 COCO 80 类预训练,后续可替换为自训练工业工具模型
 
 **输出标注格式** (`/industrial_tools/annotations`, JSON):
 ```json
@@ -320,17 +358,20 @@ ros2 launch wheeltec_sim2real_bridge bringup.launch.py \
   "stamp": 1234567890.0,
   "frame_id": "camera_color_optical_frame",
   "world_frame": "base_link",
+  "detector": "yolo",
+  "yolo_backend": "yolov5",
   "objects": [
     {
-      "class": "screwdriver", "class_cn": "螺丝刀", "class_id": 0,
-      "confidence": 0.58,
-      "bbox_xywh": [120, 80, 45, 180],
-      "center_px": [142.5, 170.0],
-      "position_camera_m": [0.05, -0.02, 0.35],
-      "position_world_m": [0.30, 0.25, 0.07],
-      "position_table_m": [0.30, 0.25, 0.07],
-      "rotation_deg": 85.2, "area_px": 4200.0,
-      "aspect": 4.0, "circularity": 0.31
+      "id": 0,
+      "class": "bottle", "class_cn": "瓶子", "class_id": 39,
+      "confidence": 0.87,
+      "bbox_xywh": [100, 200, 80, 120],
+      "center_px": [140.0, 260.0],
+      "position_camera_m": [0.12, -0.05, 0.45],
+      "position_world_m": [0.35, 0.02, 0.08],
+      "position_table_m": [0.35, 0.02, 0.08],
+      "depth_m": 0.45,
+      "industrial": true
     }
   ]
 }
@@ -344,19 +385,11 @@ base_link → joint1 → ... → joint5 → link5
 ```
 > 默认挂载参数 (`x=0.05, z=0.03, pitch=-0.3`) 为近似值,实际安装不同时覆盖 launch 参数或做手眼标定后更新。`position_world_m` 为 `base_link` 坐标系 (与 Three.js 场景坐标系一致: X前/Y左/Z上, 单位米)。
 
-**检测类别** (5 类工业工具, 与 SceneLayouts / YOLO 标注一致):
+**检测类别**: COCO 80 类预训练 (person/car/bottle/knife/scissors/...),工业相关类高亮标记 (`industrial: true`)。后续可训练自定义工业工具模型 (screwdriver/wrench/nut/screw/...) 替换 `yolo_model` 参数。
 
-| class | class_cn | class_id | 特征 |
-|-------|---------|----------|------|
-| screwdriver | 螺丝刀 | 0 | 长条形 + 彩色手柄 (HSV sat>45, hue 95-135) |
-| wrench | 扳手 | 1 | 中等长宽比 + 低填充率 |
-| nut | 螺母 | 2 | 高圆度 + 小面积 |
-| roller | 滚柱 | 3 | 长条形 + 低饱和度金属色 |
-| screw | 螺丝 | 4 | 小面积 + 中等圆度 |
+> **YOLO 推理**: 在 Jetson Orin Nano 8GB 上使用 CUDA + TensorRT,YOLOv5s 约 20+ FPS。模型文件自动从本地 `~/yolov5-pytorch/` 加载 (无需联网),或从 GitHub 下载 (首次使用)。
 
-> **分类方法**: 当前为 OpenCV 几何+颜色启发式 (circularity/aspect/HSV), 置信度 0.45–0.62。后续可替换为 YOLO 推理 (DatasetGenerator 已能生成训练集)。`rgbd_tool_detector.py` 的 `_classify_contour` 方法为替换入口。
-
-> **前端显示**: AgentPanel「检测物体」区域, 真实检测结果标注 `[RGB-D]` 标签, 虚拟场景感知无标签。perceive 工具返回结果中 `real: true` 表示来自 RGB-D。
+> **前端显示**: AgentPanel「检测物体」区域, 真实检测结果标注 `[YOLO]` 标签, 虚拟场景感知无标签。perceive 工具返回结果中 `real: true` 表示来自 YOLO+RGB-D。
 
 ## LLM 智能体自主作业系统
 
@@ -375,7 +408,7 @@ base_link → joint1 → ... → joint5 → link5
 
 | 工具 | 功能 |
 |------|------|
-| `perceive` | 感知场景中所有可见工具/零件,返回类别、世界坐标、距离、可达性;不可达时附带 `suggested_chassis`。**数据源自动切换**:有真实 RGB-D 检测结果 (5s 内, `/industrial_tools/annotations`) 时用真实数据,否则回退虚拟场景 |
+| `perceive` | 感知场景中所有可见工具/零件,返回类别、世界坐标、距离、可达性;不可达时附带 `suggested_chassis`。**数据源自动切换**:有真实 YOLO+RGB-D 检测结果 (5s 内, `/industrial_tools/annotations`) 时用真实数据,否则回退虚拟场景 |
 | `get_scene_info` | 返回双工作台位置、料箱格子坐标、臂展范围、碰撞盒、安全高度 |
 | `get_robot_state` | 返回底盘位姿、臂关节角、夹爪状态、TCP 世界坐标 |
 | `move_base` | 底盘导航到世界坐标(x,y,yaw),先自动收回机械臂到安全高度再 A* 路径规划避障行驶 |

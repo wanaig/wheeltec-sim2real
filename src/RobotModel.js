@@ -520,6 +520,40 @@ export class RobotModel {
     return q;
   }
 
+  /**
+   * 获取手眼相机光学坐标系 (camera_color_optical_frame) 在世界坐标系的位姿。
+   * 变换链: base_link → ... → link5 → [mount offset] → camera_link → [optical rotation] → optical_frame
+   *
+   * @param {Object} mount - 挂载参数 {x,y,z,roll,pitch,yaw} (link5→camera_link)
+   * @returns {{position: THREE.Vector3, quaternion: THREE.Quaternion}}
+   */
+  getCameraOpticalPose(mount = {x:0.05, y:0, z:0.03, roll:0, pitch:-0.3, yaw:0}) {
+    const g = this.jointGroups['joint5'];
+    if (!g) return { position: new THREE.Vector3(), quaternion: new THREE.Quaternion() };
+    this.root.updateMatrixWorld(true);
+
+    // link5 world pose
+    const link5Pos = new THREE.Vector3();
+    const link5Quat = new THREE.Quaternion();
+    g.getWorldPosition(link5Pos);
+    g.getWorldQuaternion(link5Quat);
+
+    // Mount offset in link5 frame → world frame
+    const mountEuler = new THREE.Euler(mount.roll, mount.pitch, mount.yaw, 'XYZ');
+    const mountQuat = new THREE.Quaternion().setFromEuler(mountEuler);
+    const worldMountQuat = link5Quat.clone().multiply(mountQuat);
+    const mountOffset = new THREE.Vector3(mount.x, mount.y, mount.z).applyQuaternion(link5Quat);
+    const camPos = link5Pos.clone().add(mountOffset);
+
+    // Optical frame rotation: camera_link (X前/Y左/Z上) → optical (X右/Y下/Z前)
+    // R = [[0,0,1],[-1,0,0],[0,-1,0]]  →  quaternion (-0.5, 0.5, -0.5, 0.5)
+    // 注意: 若 Astra URDF 的 camera_link 已是 Z前/X右/Y下, 则此旋转应为 identity
+    const optQuat = new THREE.Quaternion(-0.5, 0.5, -0.5, 0.5);
+    const worldQuat = worldMountQuat.clone().multiply(optQuat);
+
+    return { position: camPos, quaternion: worldQuat };
+  }
+
   /** 应用预设位姿 (机械臂) */
   applyPreset(name) {
     const p = PRESETS[name];

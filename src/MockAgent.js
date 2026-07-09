@@ -1,12 +1,13 @@
 /**
- * MockAgent.js — 浏览器内仿真智能体 (LLM 模式)
+ * MockAgent.js — 浏览器内智能体 (真实 RGB-D + YOLO 感知)
  *
  * MockAgent 作为 MCPToolExecutor 的物理后端, 提供:
  *   _perceive / _moveChassisTo / _moveToPose / _graspNearest / _release
- * 场景管理: resetScene / setLayout / applyLayout
+ * 场景管理: resetScene
+ * 物体来源: 真实 YOLO+RGB-D 检测 (setRealAnnotations → _syncRealTools)
  *
  * 用法 (main.js):
- *   const mockAgent = new MockAgent(robot, ik, scene, agentPanel);
+ *   const mockAgent = new MockAgent(robot, ik, scene, agentPanel, ros, chassis);
  *   agentPanel.setMockAgent(mockAgent);
  *   mockAgent.setLLMAgent(llmAgent);
  *   // 渲染循环里: mockAgent.update();
@@ -14,12 +15,9 @@
 import * as THREE from 'three';
 import { PRESETS, GRIPPER_POSES, ARM_JOINT_NAMES, GRIPPER_JOINT_NAMES, WHEEL_JOINT_NAMES } from './RobotModel.js';
 import {
-  createToolMesh, TOOL_CN, generateLayout,
-  LAYOUTS, LAYOUT_NAMES, LAYOUT_CN,
+  createToolMesh, TOOL_CN,
 } from './SceneLayouts.js';
 
-// ─────────────── 默认布局 (混杂摆放, 供初始场景使用) ───────────────
-const DEFAULT_LAYOUT = 'cluttered';
 const GRASP_ATTACH_DISTANCE = 0.035;
 
 // 料箱3格×12cm, 在左工作台上 (Y center=-0.30)
@@ -40,273 +38,139 @@ export class MockAgent {
     this.ros = ros;
     this.chassis = chassis;
     this._busy = false;
-    this._injectFailure = false; // 模拟放置失败 (下次 _release 偏移)
-    this._benchTopZ = 0.060;     // 台面顶高度 (供 DatasetGenerator 引用)
+    this._injectFailure = false;
+    this._benchTopZ = 0.060;     // 台面顶高度 (碰撞检测参考)
     this._binSlots = BIN_SLOTS;  // 料箱格子坐标 (供 MCPToolExecutor 引用)
-    this._realAnnotations = null;    // 真实 RGB-D 检测结果 (来自 /industrial_tools/annotations)
-    this._realAnnotationsTime = 0;   // 上次更新时间 (ms), 用于判断数据新鲜度
-    this._realAnnotationsTimeout = 5000; // 5s 内有效, 超时回退虚拟感知
+    this._realAnnotations = null;
+    this._realAnnotationsTime = 0;
+    this._realAnnotationsTimeout = 5000;
 
-    // 工具状态 (含 3D mesh), 初始用默认布局
-    const toolDefs = generateLayout(DEFAULT_LAYOUT, this._benchTopZ);
-    this.tools = toolDefs.map(t => ({
-      ...t, mesh: null, grasped: false, currentXyz: [...t.xyz],
-    }));
+    // 工具状态 (含 3D mesh), 由真实 YOLO+RGB-D 检测结果同步填充
+    this.tools = [];
 
-    // 静态场景对象 (台面/料箱等, 切换布局时不重建)
-    this._staticObjects = [];
-    // 工具对象 (切换布局时清除重建)
+    // 场景中的工具 3D 对象 (mesh + label)
     this._toolObjects = [];
 
-    this._lastAboveJoints = null;   // 最近一次竖直下降起点(目标正上方)关节角, 供 retract 逆序抬升
-    this._lastAboveGripper = null;  // 下降段夹爪状态 (retract 逆序需用同状态, 否则张开/闭合连杆位姿不同可能碰撞)
+    this._lastAboveJoints = null;
+    this._lastAboveGripper = null;
 
-    // 关闭碰撞检测 (仿真不需要, 避免 IK 被拒绝)
     this.robot.collisionEnabled = false;
-
-    // 当前布局名
-    this._currentLayout = DEFAULT_LAYOUT;
     this._lastCmdVelSent = 0;
 
-    this._buildScene3D();
-    this._buildTools();
+    // 构建工业环境 (工作台 + 料箱, 可见 3D 网格)
+    this._buildEnvironment();
 
-    // 初始化臂到安全抬起姿态 (避免首次 move_base 时额外抬起)
+    // 初始化臂到安全抬起姿态
     this.robot.applyJointState(ARM_JOINT_NAMES,
       ARM_JOINT_NAMES.map(j => PRESETS.arm_uplift[j]));
   }
 
-  // ─── 3D 工业场景 (双工作台: 左料箱台 / 中过道 / 右工具台) ───
-  _buildScene3D() {
-    const benchTopZ = 0.060;  // 台面顶 (离地6cm)
+  // ─── 工业环境 3D 网格 (工作台 + 料箱) ───
+  _buildEnvironment() {
+    const benchTopZ = 0.060;
     const benchCx = 0.30, benchW = 0.15, benchD = 0.38, benchT = 0.020;
     const benchMat = new THREE.MeshStandardMaterial({ color: 0x3A3A44, metalness: 0.6, roughness: 0.35 });
     const legMat = new THREE.MeshStandardMaterial({ color: 0x2A2A30, metalness: 0.5, roughness: 0.4 });
-    const legH = benchTopZ - benchT;  // 0.040m
+    const legH = benchTopZ - benchT;
+    const binMat = new THREE.MeshStandardMaterial({ color: 0x4A4A55, metalness: 0.4, roughness: 0.5, transparent: true, opacity: 0.85 });
 
-    // ── 工作台构建辅助 ──
     const buildBench = (cy) => {
-      // 台面
       const top = new THREE.Mesh(new THREE.BoxGeometry(benchW, benchD, benchT), benchMat);
       top.position.set(benchCx, cy, benchTopZ - benchT / 2);
       top.receiveShadow = true;
       this.scene.add(top);
-      // 台腿 (4条)
       for (const [lx, ly] of [[-1,-1],[-1,1],[1,-1],[1,1]]) {
         const leg = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.03, legH), legMat);
-        leg.position.set(benchCx + lx * (benchW/2 - 0.03), cy + ly * (benchD/2 - 0.03), legH / 2);
+        leg.position.set(benchCx + lx*(benchW/2-0.03), cy + ly*(benchD/2-0.03), legH/2);
         leg.castShadow = true;
         this.scene.add(leg);
       }
-      // 安全黄黑条纹 (台面边缘)
-      const stripeTex = this._createSafetyStripe();
-      stripeTex.wrapS = THREE.RepeatWrapping;
-      stripeTex.repeat.set(10, 1);
-      const stripeMat = new THREE.MeshStandardMaterial({ map: stripeTex, roughness: 0.5 });
-      const sT = 0.003;
-      for (const py of [cy - benchD/2 + 0.006, cy + benchD/2 - 0.006]) {
-        const e = new THREE.Mesh(new THREE.BoxGeometry(benchW - 0.012, 0.012, sT), stripeMat);
-        e.position.set(benchCx, py, benchTopZ + sT / 2);
-        this.scene.add(e);
-      }
-      for (const px of [benchCx - benchW/2 + 0.006, benchCx + benchW/2 - 0.006]) {
-        const e = new THREE.Mesh(new THREE.BoxGeometry(0.012, benchD - 0.012, sT), stripeMat);
-        e.position.set(px, cy, benchTopZ + sT / 2);
-        this.scene.add(e);
-      }
     };
 
-    // 左工作台 (料箱台, Y center = -0.30)
-    const binBenchY = -0.30;
-    buildBench(binBenchY);
-    // 右工作台 (工具台, Y center = +0.30)
-    const toolBenchY = +0.30;
-    buildBench(toolBenchY);
+    // 左台 (料箱台) + 右台 (工具台)
+    buildBench(-0.30);
+    buildBench(0.30);
 
-    // ── 机械臂小车大作业区 (覆盖双工作区, 底盘可自由选最近站位) ──
-    // 地面作业区标识 (黄色, PlaneGeometry 在 Z-up 系中默认水平, 无需旋转)
-    const corridorMat = new THREE.MeshStandardMaterial({ color: 0xFFCC00, metalness: 0.3, roughness: 0.5, side: THREE.DoubleSide });
-    const corridor = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.95, 1.24), corridorMat);
-    corridor.position.set(benchCx, 0, 0.001);  // 地面之上1mm
-    this.scene.add(corridor);
-    // 作业区边界白色边线
-    for (const y of [-0.62, 0.62]) {
-      const line = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.95, 0.008),
-        new THREE.MeshStandardMaterial({ color: 0xFFFFFF, roughness: 0.6, side: THREE.DoubleSide }));
-      line.position.set(benchCx, y, 0.0012);
-      this.scene.add(line);
+    // 料箱 (左台上: 3 格, 隔板 + 侧壁)
+    const binY = -0.30, binW = 0.10, binH = 0.053, binT = 0.002;
+    const wallH = benchTopZ + binH;
+    for (const wy of [-0.48, -0.36, -0.24, -0.12]) {
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(binW, binT*2, binH), binMat);
+      wall.position.set(benchCx, wy, wallH - binH/2);
+      wall.castShadow = true;
+      this.scene.add(wall);
     }
-    for (const x of [-0.25, 0.70]) {
-      const line = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.008, 1.24),
-        new THREE.MeshStandardMaterial({ color: 0xFFFFFF, roughness: 0.6, side: THREE.DoubleSide }));
-      line.position.set(x, 0, 0.0012);
-      this.scene.add(line);
+    for (const wx of [benchCx - binW/2, benchCx + binW/2]) {
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(binT*2, 0.36, binH), binMat);
+      wall.position.set(wx, binY, wallH - binH/2);
+      wall.castShadow = true;
+      this.scene.add(wall);
     }
-    // 作业区标签
-    const corLbl = this._createLabel('机械臂小车作业区', '#FFCC00');
-    corLbl.position.set(benchCx, 0, benchTopZ + 0.08);
-    corLbl.scale.set(0.05, 0.010, 1);
-    this.scene.add(corLbl);
-
-    // ── 地面安全区域标记 (黄黑斜纹, 覆盖双台+过道) ──
-    const floorStripe = this._createSafetyStripe();
-    floorStripe.wrapS = floorStripe.wrapT = THREE.RepeatWrapping;
-    floorStripe.repeat.set(16, 14);
-    const zone = new THREE.Mesh(
-      new THREE.PlaneGeometry(2.00, 2.00),
-      new THREE.MeshStandardMaterial({ map: floorStripe, transparent: true, opacity: 0.20, roughness: 0.6 }));
-    zone.position.set(benchCx, 0, 0.0008);
-    this.scene.add(zone);
-
-    // ── 工业分拣料箱 (在左工作台上; 3格×12cm) ──
-    const binColor = new THREE.MeshStandardMaterial({ color: 0x2A5AAA, roughness: 0.5, metalness: 0.1 });
-    const wallH = 0.050, wallT = 0.004, slotW = 0.12, binX = benchCx, binDpt = 0.10;
-    const binTotalW = 3 * slotW;  // 0.36m
-    const binFloorT = 0.003;
-    const binFloorZ = benchTopZ + binFloorT / 2;
-    const binWallZ = benchTopZ + binFloorT + wallH / 2;
-    // 底板
-    const binFloor = new THREE.Mesh(
-      new THREE.BoxGeometry(binDpt, binTotalW, binFloorT), binColor);
-    binFloor.position.set(binX, binBenchY, binFloorZ);
-    binFloor.receiveShadow = true;
-    this.scene.add(binFloor);
-    // 隔板 (4条 = 3格)
-    for (let i = 0; i <= 3; i++) {
-      const w = new THREE.Mesh(
-        new THREE.BoxGeometry(binDpt, wallT, wallH), binColor);
-      w.position.set(binX, binBenchY - binTotalW / 2 + i * slotW, binWallZ);
-      w.castShadow = true; w.receiveShadow = true;
-      this.scene.add(w);
-    }
-    // 侧壁 (左右)
-    for (const xOff of [-binDpt/2, binDpt/2]) {
-      const sw = new THREE.Mesh(
-        new THREE.BoxGeometry(wallT, binTotalW, wallH), binColor);
-      sw.position.set(binX + xOff, binBenchY, binWallZ);
-      sw.castShadow = true;
-      this.scene.add(sw);
-    }
-    // 料箱标签
-    const binLbl = this._createLabel('零件分拣料箱', '#88CCFF');
-    binLbl.position.set(binX, binBenchY, benchTopZ + binFloorT + wallH + 0.010);
-    binLbl.scale.set(0.07, 0.012, 1);
-    this.scene.add(binLbl);
-    // 格子编号
-    for (let i = 1; i <= 3; i++) {
-      const lbl = this._createLabel(`${i}`, '#44FF88');
-      lbl.position.set(binX, BIN_SLOTS[i][1], benchTopZ + binFloorT + wallH + 0.003);
-      lbl.scale.set(0.016, 0.009, 1);
-      this.scene.add(lbl);
-    }
-    // 工具台标签
-    const toolLbl = this._createLabel('工具散乱区', '#FFCC44');
-    toolLbl.position.set(benchCx, toolBenchY, benchTopZ + 0.035);
-    toolLbl.scale.set(0.06, 0.011, 1);
-    this.scene.add(toolLbl);
-
-    // ── 工业标牌 ──
-    const warn = this._createLabel('⚠ 自动作业区域  AUTO MODE', '#FFAA00');
-    warn.position.set(benchCx, 0, benchTopZ + 0.22);
-    warn.scale.set(0.12, 0.020, 1);
-    this.scene.add(warn);
+    // 料箱底板
+    const floor = new THREE.Mesh(new THREE.BoxGeometry(binW, 0.36, 0.002), binMat);
+    floor.position.set(benchCx, binY, benchTopZ + 0.001);
+    floor.receiveShadow = true;
+    this.scene.add(floor);
   }
 
-  /** 构建工具 mesh (从当前 this.tools 定义) */
-  _buildTools() {
-    // 清除旧工具
-    for (const obj of this._toolObjects) {
-      this.scene.remove(obj);
-      if (obj.traverse) obj.traverse(c => {
-        if (c.isMesh) { c.geometry?.dispose?.(); c.material?.dispose?.(); }
-      });
-    }
-    this._toolObjects = [];
-
-    for (let i = 0; i < this.tools.length; i++) {
-      const t = this.tools[i];
-      t.mesh = createToolMesh(t.class);
-      t.mesh.position.set(...t.currentXyz);
-      t.mesh.rotation.z = t.rot || 0;
-      t.mesh.traverse(c => { if (c.isMesh) { c.castShadow = true; } });
-      this.scene.add(t.mesh);
-      this._toolObjects.push(t.mesh);
-      // 工具标签 (在工具上方)
-      t.label = this._createLabel(TOOL_CN[t.class] || t.class, '#FFCC44');
-      t.label.position.set(t.currentXyz[0], t.currentXyz[1], t.currentXyz[2] + 0.035);
-      t.label.scale.set(0.040, 0.009, 1);
-      this.scene.add(t.label);
-      this._toolObjects.push(t.label);
-    }
-  }
-
-  _createSafetyStripe() {
-    const cv = document.createElement('canvas');
-    cv.width = 128; cv.height = 16;
-    const ctx = cv.getContext('2d');
-    for (let i = -2; i < 10; i++) {
-      ctx.fillStyle = i % 2 === 0 ? '#FFCC00' : '#1a1a1a';
-      ctx.beginPath();
-      ctx.moveTo(i * 16, 0);
-      ctx.lineTo((i + 1) * 16, 0);
-      ctx.lineTo((i + 1) * 16 + 8, 16);
-      ctx.lineTo(i * 16 + 8, 16);
-      ctx.fill();
-    }
-    return new THREE.CanvasTexture(cv);
-  }
-
-  /** 重置场景 (工具归位到当前布局, 机械臂归零, 夹爪张开, 底盘停止) */
+  /** 重置场景 (清空检测物体, 机械臂归零, 夹爪张开, 底盘停止) */
   resetScene() {
-    // 重新生成当前布局 (回到初始状态)
-    this.applyLayout(
-      generateLayout(this._currentLayout, this._benchTopZ)
-    );
-    // 取消底盘导航, 停止移动
-    if (this.chassis && this.chassis._navActive) {
-      this.chassis.cancelNav();
-    }
-    if (this.chassis) {
-      this.chassis.v = 0;
-      this.chassis.w = 0;
-    }
-    // 机械臂归零 + 夹爪完全张开 (与归零按钮行为一致)
+    for (const t of this.tools) this._removeToolFromScene(t);
+    this.tools = [];
+    if (this.chassis && this.chassis._navActive) this.chassis.cancelNav();
+    if (this.chassis) { this.chassis.v = 0; this.chassis.w = 0; }
     const resetPose = { ...PRESETS.arm_home, ...GRIPPER_POSES.open };
     this.robot.tweenTo(resetPose, 1.0);
-    // 同步发布到真机
     this._sendArmCommand(resetPose);
-    if (this.chassis && this.ros?.publishEnabled && this.ros?.connected) {
-      this.ros.sendCmdVel(0, 0);
-    }
+    if (this.chassis && this.ros?.publishEnabled && this.ros?.connected) this.ros.sendCmdVel(0, 0);
     this._log('[reset] 场景已重置, 机械臂归零, 夹爪张开');
     this._setStatus('done', '场景重置');
   }
 
-  /**
-   * 切换布局 (供 AgentPanel / DatasetGenerator 调用)
-   * @param {Array} toolDefs - [{class, xyz, rot}, ...] 来自 SceneLayouts.generateLayout
-   */
-  applyLayout(toolDefs) {
-    this.tools = toolDefs.map(t => ({
-      ...t, mesh: null, grasped: false, currentXyz: [...t.xyz],
-    }));
-    this._buildTools();
-  }
+  /** 生成模拟测试工具 (无需真实相机即可测试全链路) */
+  spawnTestTools() {
+    // 清空现有工具
+    for (const t of this.tools) this._removeToolFromScene(t);
+    this.tools = [];
 
-  /** 按名称切换布局 */
-  setLayout(name) {
-    if (!LAYOUTS[name]) {
-      this._log(`[layout] 未知布局: ${name}`);
-      return;
+    // 5种工业工具, 摆放在右台 (工具台)
+    const benchTopZ = this._benchTopZ;
+    const testDefs = [
+      { class: 'screwdriver', xyz: [0.26, 0.20, benchTopZ + 0.008], rot: 0.3 },
+      { class: 'wrench',      xyz: [0.30, 0.25, benchTopZ + 0.002], rot: -0.5 },
+      { class: 'nut',         xyz: [0.34, 0.20, benchTopZ + 0.007], rot: 0 },
+      { class: 'roller',      xyz: [0.28, 0.35, benchTopZ + 0.009], rot: 1.2 },
+      { class: 'screw',       xyz: [0.32, 0.38, benchTopZ + 0.004], rot: 0.8 },
+    ];
+
+    for (const def of testDefs) {
+      const mesh = createToolMesh(def.class);
+      mesh.position.set(...def.xyz);
+      mesh.rotation.z = def.rot || 0;
+      mesh.traverse(c => { if (c.isMesh) { c.castShadow = true; } });
+      this.scene.add(mesh);
+      this._toolObjects.push(mesh);
+
+      const label = this._createLabel(TOOL_CN[def.class] || def.class, '#FFCC44');
+      label.position.set(def.xyz[0], def.xyz[1], def.xyz[2] + 0.035);
+      label.scale.set(0.040, 0.009, 1);
+      this.scene.add(label);
+      this._toolObjects.push(label);
+
+      this.tools.push({
+        class: def.class,
+        class_cn: TOOL_CN[def.class] || def.class,
+        xyz: [...def.xyz],
+        rot: def.rot,
+        mesh, label,
+        grasped: false,
+        currentXyz: [...def.xyz],
+        real: false,
+        confidence: 0.95,
+      });
     }
-    this._currentLayout = name;
-    const toolDefs = generateLayout(name, this._benchTopZ);
-    this.applyLayout(toolDefs);
-    this._log(`[layout] 切换至「${LAYOUT_CN[name] || name}」→ ${toolDefs.length}个工具`);
-    this._setStatus('done', `布局: ${LAYOUT_CN[name] || name}`);
+    this._log(`[test] 已生成 ${testDefs.length} 个模拟工具: ${testDefs.map(d=>TOOL_CN[d.class]).join(', ')}`);
+    this._setStatus('done', '模拟工具已生成');
   }
 
   _createLabel(text, color = '#FFCC44') {
@@ -344,32 +208,110 @@ export class MockAgent {
   }
 
   // ─── 感知 ───
-  // 真实 RGB-D 检测结果注入 (由 AgentPanel 从 /industrial_tools/annotations 接收后调用)
+  // 真实 YOLO+RGB-D 检测结果注入 (由 AgentPanel 从 /industrial_tools/annotations 接收后调用)
+  // 将真实检测到的物体同步为 3D Mesh 放入场景 + this.tools,
+  // 使 grasp/release/verify 全链路打通 (sim2real 闭环)
   setRealAnnotations(objects) {
-    this._realAnnotations = objects;
+    this._realAnnotations = objects || [];
     this._realAnnotationsTime = performance.now();
+    this._syncRealTools(this._realAnnotations);
+  }
+
+  // 将真实检测结果同步到 this.tools 和 3D 场景
+  _syncRealTools(detections) {
+    const kept = [];
+    for (const t of this.tools) {
+      if (t.grasped) { kept.push(t); }
+      else { this._removeToolFromScene(t); }
+    }
+    this.tools = kept;
+    for (const obj of detections) {
+      if (!obj || !obj.position_world_m) continue;
+      this._addRealToolToScene(obj);
+    }
+  }
+
+  _removeToolFromScene(t) {
+    if (t.mesh) {
+      this.scene.remove(t.mesh);
+      t.mesh.traverse(c => {
+        if (c.isMesh) { c.geometry?.dispose?.(); c.material?.dispose?.(); }
+      });
+      const i = this._toolObjects.indexOf(t.mesh);
+      if (i >= 0) this._toolObjects.splice(i, 1);
+    }
+    if (t.label) {
+      this.scene.remove(t.label);
+      if (t.label.material?.map) t.label.material.map.dispose();
+      t.label.material?.dispose();
+      const i = this._toolObjects.indexOf(t.label);
+      if (i >= 0) this._toolObjects.splice(i, 1);
+    }
+  }
+
+  _addRealToolToScene(obj) {
+    const xyz = [...obj.position_world_m];
+    const cls = obj.class || 'unknown';
+    const clsCn = obj.class_cn || TOOL_CN[cls] || cls;
+
+    const KNOWN_TOOLS = ['screwdriver', 'wrench', 'nut', 'roller', 'screw'];
+    let mesh;
+    if (KNOWN_TOOLS.includes(cls)) {
+      mesh = createToolMesh(cls);
+    } else {
+      mesh = this._createGenericObjectMesh(cls);
+    }
+    mesh.position.set(...xyz);
+    mesh.traverse(c => { if (c.isMesh) { c.castShadow = true; } });
+    this.scene.add(mesh);
+    this._toolObjects.push(mesh);
+
+    const label = this._createLabel(clsCn, '#44FF88');
+    label.position.set(xyz[0], xyz[1], xyz[2] + 0.035);
+    label.scale.set(0.040, 0.009, 1);
+    this.scene.add(label);
+    this._toolObjects.push(label);
+
+    this.tools.push({
+      class: cls,
+      class_cn: clsCn,
+      xyz: [...xyz],
+      rot: 0,
+      mesh,
+      label,
+      grasped: false,
+      currentXyz: [...xyz],
+      real: true,
+      confidence: obj.confidence ?? 0.5,
+    });
+  }
+
+  _createGenericObjectMesh(className) {
+    const g = new THREE.Group();
+    let hash = 0;
+    for (let i = 0; i < className.length; i++) {
+      hash = ((hash << 5) - hash + className.charCodeAt(i)) | 0;
+    }
+    const hue = Math.abs(hash) % 360;
+    const color = new THREE.Color().setHSL(hue / 360, 0.6, 0.5);
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(0.025, 0.025, 0.025),
+      new THREE.MeshStandardMaterial({ color, metalness: 0.3, roughness: 0.5 })
+    );
+    body.castShadow = true;
+    g.add(body);
+    g.scale.setScalar(0.5);
+    return g;
   }
 
   _perceive() {
-    // 优先使用真实 RGB-D 检测结果 (5s 内有效)
-    if (this._realAnnotations && this._realAnnotations.length >= 0 &&
-        performance.now() - this._realAnnotationsTime < this._realAnnotationsTimeout) {
-      return this._realAnnotations
-        .filter(o => o && o.position_world_m)
-        .map(o => ({
-          class: o.class || 'unknown',
-          xyz: [...o.position_world_m],
-          conf: o.confidence ?? 0.5,
-          real: true,
-        }));
-    }
-    // 回退: 虚拟场景感知
     return this.tools
       .filter(t => !t.grasped)
       .map(t => ({
         class: t.class,
         xyz: [...t.currentXyz],
-        conf: 0.9,
+        conf: t.confidence ?? 0.5,
+        real: !!t.real,
       }));
   }
 
@@ -1143,7 +1085,7 @@ export class MockAgent {
     }
   }
 
-  // ─── 主入口 (LLM 模式) ───
+  // ─── 主入口 (LLM 模式 / 正则 NLU 回退) ───
   async run(instruction) {
     if (this._busy) return;
     this._busy = true;
@@ -1151,12 +1093,19 @@ export class MockAgent {
     this._log(`>>> 指令: ${instruction}`);
     this._setStatus('running', instruction);
 
+    // 无 API Key → 正则 NLU 模式
     if (!this._llmAgent || !this._llmAgent.apiKey) {
-      this._log('<<< 结果: failed — 未配置 API Key, 请在面板中设置');
-      this._setStatus('failed', '未配置 API Key');
+      this._log('[NLU] 未配置 API Key, 启动正则指令解析模式');
+      try {
+        await this.runNLU(instruction);
+      } catch (e) {
+        this._log(`[NLU] 异常: ${e.message}`);
+        this._setStatus('failed', e.message);
+      }
       this._busy = false;
       return;
     }
+
     this._log('[LLM] 启动大模型决策模式');
     try {
       const result = await this._llmAgent.run(instruction);
@@ -1174,6 +1123,196 @@ export class MockAgent {
     this._busy = false;
   }
 
+  // ─── 正则 NLU 指令解析 (无 API Key 时的回退模式) ───
+
+  /** 工具中文名 → 英文 class */
+  static TOOL_CN_MAP = {
+    '扳手': 'wrench', '螺丝刀': 'screwdriver', '螺母': 'nut',
+    '滚柱': 'roller', '螺丝': 'screw',
+  };
+  static TOOL_CN_KEYS = ['螺丝刀', '扳手', '螺母', '滚柱', '螺丝'];
+
+  /**
+   * 正则解析自然语言指令, 提取动作/工具/位置/料箱格.
+   * @returns {{action, toolClass, side?, slot?} | null}
+   */
+  parseInstruction(text) {
+    const t = text.replace(/\s/g, '');
+    let action = null;
+    let toolClass = null;
+    let side = null;
+    let slot = null;
+
+    // 动作识别
+    if (/(?:取|拿|抓|给|捡|夹)/.test(t)) action = 'grasp';
+    else if (/(?:放|置|丢|扔)/.test(t)) action = 'place';
+    if (!action) return null;
+
+    // 工具识别 (按长度倒序, 避免"螺丝"匹配"螺丝刀")
+    for (const cn of MockAgent.TOOL_CN_KEYS) {
+      if (t.includes(cn)) {
+        toolClass = MockAgent.TOOL_CN_MAP[cn];
+        break;
+      }
+    }
+    if (!toolClass) return null;
+
+    // 位置 (左/右)
+    if (/(?:左)/.test(t)) side = 'left';
+    else if (/(?:右)/.test(t)) side = 'right';
+
+    // 料箱格子
+    const slotMatch = t.match(/第\s*([一二三四1234])\s*[个]?(?:格|槽|料箱)/);
+    if (slotMatch) {
+      const m = slotMatch[1];
+      slot = { '一': 1, '二': 2, '三': 3, '四': 4, '1': 1, '2': 2, '3': 3, '4': 4 }[m] || null;
+    }
+
+    return { action, toolClass, side, slot };
+  }
+
+  /** 正则 NLU 模式: 解析指令 → 脚本化执行 */
+  async runNLU(instruction) {
+    const plan = this.parseInstruction(instruction);
+    if (!plan) {
+      this._log('[NLU] 无法解析指令, 请使用格式如: "取出左侧的扳手" 或 "把滚柱放到料箱第三格"');
+      this._setStatus('failed', '指令无法解析');
+      return;
+    }
+
+    this._log(`[NLU] 解析结果: 动作=${plan.action} 工具=${plan.toolClass} 位置=${plan.side || '任意'} 格子=${plan.slot || '无'}`);
+
+    // 步骤1: 感知
+    this._log('[nlu] 步骤1: 感知场景物体');
+    const objects = this._perceive();
+    if (objects.length === 0) {
+      this._log('[NLU] 未检测到任何物体, 请确认 RGB-D 相机和 YOLO 检测器已启动');
+      this._setStatus('failed', '未检测到物体');
+      return;
+    }
+    this._log(`[nlu] 检测到 ${objects.length} 个物体: ${objects.map(o => `${o.class}@(${o.xyz.map(v=>v.toFixed(2))})`).join(', ')}`);
+
+    // 步骤2: 筛选目标工具
+    let candidates = objects.filter(o => o.class === plan.toolClass);
+    if (candidates.length === 0) {
+      // 尝试模糊匹配 (COCO类名包含工具名)
+      candidates = objects.filter(o => o.class.includes(plan.toolClass) || plan.toolClass.includes(o.class));
+    }
+    if (candidates.length === 0) {
+      this._log(`[NLU] 未找到 ${plan.toolClass}, 当前检测到的类别: ${objects.map(o=>o.class).join(', ')}`);
+      this._setStatus('failed', `未找到${plan.toolClass}`);
+      return;
+    }
+
+    // 按位置筛选
+    if (plan.side === 'left') {
+      const left = candidates.filter(o => o.xyz[1] < 0);
+      if (left.length > 0) candidates = left;
+    } else if (plan.side === 'right') {
+      const right = candidates.filter(o => o.xyz[1] > 0);
+      if (right.length > 0) candidates = right;
+    }
+
+    // 选最近的
+    const tcp = this.robot.getGripperTCP();
+    candidates.sort((a, b) => {
+      const da = Math.hypot(a.xyz[0]-tcp.x, a.xyz[1]-tcp.y);
+      const db = Math.hypot(b.xyz[0]-tcp.x, b.xyz[1]-tcp.y);
+      return da - db;
+    });
+    const target = candidates[0];
+    this._log(`[nlu] 步骤2: 选定目标 ${target.class} @ (${target.xyz.map(v=>v.toFixed(3))}) 距离=${Math.hypot(target.xyz[0]-tcp.x, target.xyz[1]-tcp.y).toFixed(2)}m`);
+
+    // 步骤3: 规划并移动到目标
+    this._log('[nlu] 步骤3: 规划臂运动到目标位置');
+    const moveResult = await this._moveToPose({ x: target.xyz[0], y: target.xyz[1], z: target.xyz[2], d: 1.5 });
+    if (!moveResult.ok) {
+      this._log(`[NLU] 无法到达目标: ${moveResult.reason}`);
+      this._setStatus('failed', moveResult.reason);
+      return;
+    }
+
+    // 步骤4: 抓取
+    this._log('[nlu] 步骤4: 闭合夹爪抓取');
+    await this._tween({ ...GRIPPER_POSES.close }, 0.8);
+    this._sendArmCommand({ ...GRIPPER_POSES.close });
+    const grasped = this._graspNearest();
+    if (!grasped) {
+      this._log('[NLU] 抓取失败: 物体不在夹爪范围内');
+      this._setStatus('failed', '抓取失败');
+      return;
+    }
+    this._log('[nlu] 抓取成功');
+
+    // 步骤5: 收回
+    this._log('[nlu] 步骤5: 收回机械臂');
+    await this._retract({});
+
+    // 步骤6: 如果是放置动作 → 移动到料箱并放置
+    if (plan.action === 'place' && plan.slot) {
+      const slotPos = this._binSlots[plan.slot];
+      if (!slotPos) {
+        this._log(`[NLU] 料箱第${plan.slot}格不存在`);
+        this._setStatus('failed', '料箱格子无效');
+        return;
+      }
+      this._log(`[nlu] 步骤6: 移动到料箱第${plan.slot}格 @ (${slotPos.map(v=>v.toFixed(2))})`);
+
+      // 底盘导航 (如果太远)
+      const distToSlot = Math.hypot(slotPos[0] - tcp.x, slotPos[1] - tcp.y);
+      if (distToSlot > 0.35) {
+        this._log('[nlu] 步骤6a: 底盘导航靠近料箱');
+        const chassisX = slotPos[0] - 0.15;
+        const chassisY = slotPos[1] > 0 ? Math.max(0.05, slotPos[1] - 0.15) : Math.min(-0.05, slotPos[1] + 0.15);
+        await this._moveChassisTo(chassisX, chassisY, 0, 2.0);
+      }
+
+      // 规划到格子
+      this._log('[nlu] 步骤6b: 规划臂运动到格子');
+      const placeResult = await this._moveToPose({ x: slotPos[0], y: slotPos[1], z: slotPos[2], d: 1.5 });
+      if (!placeResult.ok) {
+        this._log(`[NLU] 无法到达格子: ${placeResult.reason}`);
+        this._setStatus('failed', placeResult.reason);
+        return;
+      }
+
+      // 释放
+      this._log('[nlu] 步骤6c: 张开夹爪释放');
+      await this._tween({ ...GRIPPER_POSES.open }, 0.8);
+      this._sendArmCommand({ ...GRIPPER_POSES.open });
+      this._release();
+      this._log('[nlu] 放置完成');
+
+      // 收回
+      this._log('[nlu] 步骤7: 收回机械臂');
+      await this._retract({});
+    }
+
+    this._log('<<< 结果: done (正则NLU模式完成)');
+    this._setStatus('done', 'NLU模式完成');
+  }
+
   /** 设置 LLM 智能体 (由 main.js 注入) */
   setLLMAgent(llmAgent) { this._llmAgent = llmAgent; }
+
+  /** 应用工具布局 (供 DatasetGenerator 调用: 清空当前工具, 用给定定义重建) */
+  applyLayout(toolDefs) {
+    for (const t of this.tools) this._removeToolFromScene(t);
+    this.tools = (toolDefs || []).map(t => ({
+      ...t, mesh: null, label: null, grasped: false, currentXyz: [...t.xyz],
+    }));
+    for (const t of this.tools) {
+      t.mesh = createToolMesh(t.class);
+      t.mesh.position.set(...t.currentXyz);
+      t.mesh.rotation.z = t.rot || 0;
+      t.mesh.traverse(c => { if (c.isMesh) { c.castShadow = true; } });
+      this.scene.add(t.mesh);
+      this._toolObjects.push(t.mesh);
+      t.label = this._createLabel(TOOL_CN[t.class] || t.class, '#FFCC44');
+      t.label.position.set(t.currentXyz[0], t.currentXyz[1], t.currentXyz[2] + 0.035);
+      t.label.scale.set(0.040, 0.009, 1);
+      this.scene.add(t.label);
+      this._toolObjects.push(t.label);
+    }
+  }
 }

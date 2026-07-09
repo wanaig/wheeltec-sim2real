@@ -130,29 +130,44 @@ ros2 launch wheeltec_sim2real_bridge bringup.launch.py \
 ros2 launch wheeltec_sim2real_bridge bringup.launch.py cameras:=false
 ```
 
-## RGB-D 工业工具感知与标注
+## YOLO + RGB-D 工业检测与标注
 
-可选启动 `rgbd_tool_detector`，基于 RGB-D 相机获取桌面工具/零件信息，输出类别、像素框、相机坐标和桌面坐标，用于模拟工业现场和构建数据集。
+可选启动 `rgbd_tool_detector`，基于 YOLO 目标检测 + RGB-D 深度，获取桌面物体类别、像素框、3D 坐标和世界坐标，用于模拟工业现场和构建数据集。
 
-默认输入话题：
+**架构: ROS2 + OpenCV + YOLO + RGB-D**
+
+YOLO 后端自动检测：
+- **ultralytics (YOLOv8)**: `pip install ultralytics` 后自动使用
+- **YOLOv5 (torch.hub)**: 从 `~/yolov5-pytorch/` 本地加载，无需 pip install
+
+默认输入话题（Astra S 手眼相机）：
 
 | 输入 | 默认话题 |
 |---|---|
-| RGB 图像 | `/camera/rgb/image_raw` |
-| 深度图像 | `/camera/depth/image_raw` |
-| 相机内参 | `/camera/rgb/camera_info` |
+| RGB 图像 (compressed) | `/camera/color/image_raw/compressed` |
+| 深度图像 (compressed) | `/camera/depth/image_raw/compressed` |
+| 相机内参 | `/camera/color/camera_info` |
 
 输出话题：
 
 | 输出 | 话题 | 类型 |
 |---|---|---|
-| 工具 JSON 标注 | `/industrial_tools/annotations` | `std_msgs/msg/String` |
+| 物体 JSON 标注 | `/industrial_tools/annotations` | `std_msgs/msg/String` |
 | 带框调试图 | `/industrial_tools/debug_image/compressed` | `sensor_msgs/msg/CompressedImage` |
 
-启动：
+启动（需先启动 Astra 手眼相机）：
 
 ```bash
-ros2 launch wheeltec_sim2real_bridge bringup.launch.py rgbd_detector:=true
+ros2 launch wheeltec_sim2real_bridge bringup.launch.py \
+  astra_hand:=true rgbd_detector:=true echo_joint_states:=true
+```
+
+自定义 YOLO 参数：
+
+```bash
+ros2 launch wheeltec_sim2real_bridge bringup.launch.py \
+  astra_hand:=true rgbd_detector:=true \
+  yolo_model:=yolov8n.pt yolo_conf:=0.5 yolo_device:=cuda:0
 ```
 
 如果 RGB-D 相机话题不同：
@@ -171,7 +186,7 @@ ros2 topic echo /industrial_tools/annotations
 ros2 topic hz /industrial_tools/debug_image/compressed
 ```
 
-前端连接 rosbridge 后，智能体面板“检测物体”会自动显示 `/industrial_tools/annotations` 中的工具类别、位置坐标、置信度和像素框；也可以把底部任一相机槽话题改为 `/industrial_tools/debug_image/compressed` 查看检测框画面。
+前端连接 rosbridge 后，智能体面板“检测物体”会自动显示 `/industrial_tools/annotations` 中的物体类别、位置坐标、置信度和像素框（标注 `[YOLO]` 标签）；也可以把底部任一相机槽话题改为 `/industrial_tools/debug_image/compressed` 查看检测框画面。
 
 ## 前端连接
 

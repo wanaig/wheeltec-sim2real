@@ -11,7 +11,6 @@
  * 风格与 style.css 深色主题一致; 版本自适应 (ROS1/ROS2 消息类型字符串)。
  */
 import ROSLIB from 'roslib';
-import { LAYOUT_NAMES, LAYOUT_CN } from './SceneLayouts.js';
 
 const STR_TYPE = {
   ros1: 'std_msgs/String',
@@ -111,11 +110,11 @@ export class AgentPanel {
     this.console = document.createElement('div');
     this.console.id = 'agent-console';
     this.console.innerHTML = `
-      <div class="ac-head">
-        <span class="ac-title">🤖 交互型智能体</span>
-        <span class="ac-status" id="ac-status">未连接</span>
-        <button class="mini-btn" id="ac-collapse">折叠</button>
-      </div>
+  <div class="ac-head">
+    <span class="ac-title">🤖 交互型智能体</span>
+    <span class="ac-status" id="ac-status">未连接</span>
+    <button class="mini-btn" id="ac-collapse">折叠</button>
+  </div>
       <div class="ac-body">
         <div class="ac-section">
           <div class="ac-row">
@@ -153,30 +152,14 @@ export class AgentPanel {
     btnReset.textContent = '重置场景';
     btnReset.onclick = () => { if (this._mockAgent) this._mockAgent.resetScene(); };
     ctrlRow.appendChild(btnReset);
-    quick.appendChild(ctrlRow);
 
-    // 场景布局切换 + 数据集生成
-    const sceneRow = document.createElement('div');
-    sceneRow.className = 'ac-scene-row';
-    const sceneLbl = document.createElement('span');
-    sceneLbl.className = 'ac-llm-label';
-    sceneLbl.textContent = '场景布局 / 数据集';
-    sceneRow.appendChild(sceneLbl);
-    for (const name of LAYOUT_NAMES) {
-      const b = document.createElement('button');
-      b.className = 'ac-quick-btn scene';
-      b.textContent = LAYOUT_CN[name];
-      b.onclick = () => { if (this._mockAgent) this._mockAgent.setLayout(name); };
-      sceneRow.appendChild(b);
-    }
-    // 数据集生成按钮
-    const btnGen = document.createElement('button');
-    btnGen.id = 'ac-gen-dataset';
-    btnGen.className = 'ac-quick-btn gen';
-    btnGen.textContent = '生成数据集 (图像+YOLO标注)';
-    btnGen.onclick = () => this._generateDataset();
-    sceneRow.appendChild(btnGen);
-    quick.appendChild(sceneRow);
+    const btnSpawn = document.createElement('button');
+    btnSpawn.className = 'ac-quick-btn ctrl';
+    btnSpawn.textContent = '生成测试工具';
+    btnSpawn.onclick = () => { if (this._mockAgent) this._mockAgent.spawnTestTools(); };
+    ctrlRow.appendChild(btnSpawn);
+
+    quick.appendChild(ctrlRow);
 
     // LLM 大模型配置区
     const llmRow = document.createElement('div');
@@ -410,44 +393,9 @@ export class AgentPanel {
     }
   }
 
-  /** 设置数据集生成器 */
-  setDatasetGenerator(gen) {
-    this._datasetGen = gen;
-  }
-
   /** 设置 LLM 智能体 */
   setLLMAgent(agent) {
     this._llmAgent = agent;
-  }
-
-  /** 生成数据集 */
-  async _generateDataset() {
-    if (!this._datasetGen) {
-      this._pushLog('[dataset] 数据集生成器未初始化');
-      return;
-    }
-    if (this._busy) {
-      this._pushLog('[dataset] 智能体忙, 请稍后再试');
-      return;
-    }
-    const btn = this.console.querySelector('#ac-gen-dataset');
-    if (btn) { btn.disabled = true; btn.textContent = '生成中...'; }
-    this._pushLog('[dataset] 开始生成数据集...');
-    this._datasetGen.onProgress(msg => this._pushLog(`[dataset] ${msg}`));
-    try {
-      const samples = await this._datasetGen.generate({
-        layouts: LAYOUT_NAMES,
-        viewsPerLayout: 8,
-        randomSeeds: 3,
-        imgWidth: 640,
-        imgHeight: 480,
-      });
-      this._pushLog(`[dataset] 完成! ${samples.length}张图像+标注已下载`);
-    } catch (e) {
-      this._pushLog(`[dataset] 错误: ${e.message}`);
-    } finally {
-      if (btn) { btn.disabled = false; btn.textContent = '生成数据集 (图像+YOLO标注)'; }
-    }
   }
 
   /** 发送自然语言指令 */
@@ -527,8 +475,8 @@ export class AgentPanel {
     try {
       const payload = JSON.parse(data);
       const objects = Array.isArray(payload.objects) ? payload.objects : [];
-      // 注入真实检测结果到 MockAgent (供 perceive 工具使用, 优先于虚拟场景)
-      if (this._mockAgent && objects.length > 0) {
+      // 注入真实检测结果到 MockAgent (同步 3D 场景 + this.tools, sim2real 闭环)
+      if (this._mockAgent) {
         this._mockAgent.setRealAnnotations(
           objects.filter(o => o.position_world_m || o.position_table_m).map(o => ({
             class: o.class || 'unknown',
@@ -626,7 +574,7 @@ export class AgentPanel {
       const conf = o.conf != null ? ` conf=${Number(o.conf).toFixed(2)}` : '';
       const bbox = o.bbox ? ` bbox=[${o.bbox}]` : '';
       const reach = o.reachable === false ? ' <span style="color:#ffaa55">[远]</span>' : '';
-      const tag = o.real ? ' <span style="color:#4af">[RGB-D]</span>' : '';
+      const tag = o.real ? ' <span style="color:#4af">[YOLO]</span>' : '';
       return `<span class="ac-obj"><b>${o.class}</b> @[${o.xyz}]${conf}${bbox}${reach}${tag}</span>`;
     }).join('');
   }
