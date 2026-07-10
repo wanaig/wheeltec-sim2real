@@ -239,9 +239,12 @@ supervise() {
     >"$LOGDIR/astra_hand_republish.log" 2>&1 &
   REPUB_PID=$!
 
-  # 3b. republish (depth raw -> compressed, PNG 16-bit)
+  # 3b. republish (depth raw -> compressed, PNG 16-bit 无损)
+  #     必须用 PNG 格式: JPEG 会有损压缩 16-bit depth 为 8-bit, 深度值完全错误
+  #     _compressed/format:=png 强制用 PNG (无损, 保留 uint16)
   nohup rosrun image_transport republish \
     raw in:=/camera/depth/image_raw compressed out:=/camera/depth/image_raw \
+    _compressed/format:=png \
     >"$LOGDIR/astra_hand_republish_depth.log" 2>&1 &
   DEPTH_REPUB_PID=$!
   sleep 2

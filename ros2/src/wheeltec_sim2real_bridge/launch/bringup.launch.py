@@ -193,6 +193,13 @@ def generate_launch_description():
                 'yolo_conf': LaunchConfiguration('yolo_conf'),
                 'yolo_device': LaunchConfiguration('yolo_device'),
                 'yolo_imgsz': LaunchConfiguration('yolo_imgsz'),
+                # Fallback FK 参数 (TF 不可用时检测器自己算坐标变换)
+                'hand_cam_x': LaunchConfiguration('hand_cam_x'),
+                'hand_cam_y': LaunchConfiguration('hand_cam_y'),
+                'hand_cam_z': LaunchConfiguration('hand_cam_z'),
+                'hand_cam_roll': LaunchConfiguration('hand_cam_roll'),
+                'hand_cam_pitch': LaunchConfiguration('hand_cam_pitch'),
+                'hand_cam_yaw': LaunchConfiguration('hand_cam_yaw'),
             }],
             condition=IfCondition(LaunchConfiguration('rgbd_detector')),
         )],

@@ -542,17 +542,55 @@ export class MockAgent {
     if (Math.hypot(goal.x - targetX, goal.y - targetY) > 0.01) {
       this._log(`[chassis] 目标站位碰撞, 改到最近安全点 (${goal.x.toFixed(2)}, ${goal.y.toFixed(2)})`);
     }
-    if (this._segmentChassisSafe(start, goal)) return [goal];
 
+    // 起点不在 MOBILE_AREA 内: 钳制到边界, 先直线进入再走 A*
+    if (!this._isInMobileArea(start.x, start.y)) {
+      const area = MockAgent.MOBILE_AREA;
+      const r = MockAgent.CHASSIS_RADIUS;
+      const cx = Math.max(area.xMin + r, Math.min(area.xMax - r, start.x));
+      const cy = Math.max(area.yMin + r, Math.min(area.yMax - r, start.y));
+      const entry = this._nearestSafeChassisPoint(cx, cy);
+      if (entry) {
+        this._log(`[chassis] 起点在移动区域外 (${start.x.toFixed(2)},${start.y.toFixed(2)}), 先进入区域 (${entry.x.toFixed(2)}, ${entry.y.toFixed(2)})`);
+        if (this._segmentChassisSafe(entry, goal)) return [entry, goal];
+        const restPath = this._aStarGrid(entry.x, entry.y, goal.x, goal.y);
+        return [{ x: entry.x, y: entry.y }, ...restPath];
+      }
+      // 找不到入口: 直线到目标 (区域外无障碍)
+      return [goal];
+    }
+
+    if (this._segmentChassisSafe(start, goal)) return [goal];
+    return this._aStarGrid(start.x, start.y, goal.x, goal.y);
+  }
+
+  /** A* 网格搜索 (起点和目标都在 MOBILE_AREA 内) */
+  _aStarGrid(startX, startY, goalX, goalY) {
+    const start = { x: startX, y: startY };
+    const goal = { x: goalX, y: goalY };
     const res = 0.04;
     const area = MockAgent.MOBILE_AREA;
     const ix = (x) => Math.round((x - area.xMin) / res);
     const iy = (y) => Math.round((y - area.yMin) / res);
     const wx = (i) => area.xMin + i * res;
     const wy = (i) => area.yMin + i * res;
-    const sx = ix(start.x), sy = iy(start.y);
+    let sx = ix(start.x), sy = iy(start.y);
     let gx = ix(goal.x), gy = iy(goal.y);
-    // 网格离散化可能导致目标格不安全 → 搜索最近安全格
+    // 起点格不安全 → 搜索最近安全起点格
+    if (!this._isChassisPoseSafe(wx(sx), wy(sy))) {
+      let found = null;
+      for (let r = 1; r <= 50 && !found; r++) {
+        for (let i = -r; i <= r && !found; i++) {
+          for (const [cx, cy] of [[i,r],[i,-r],[r,i],[-r,i]]) {
+            const nx = sx + cx, ny = sy + cy;
+            if (this._isChassisPoseSafe(wx(nx), wy(ny))) { found = { x: nx, y: ny }; break; }
+          }
+        }
+      }
+      if (found) { sx = found.x; sy = found.y; }
+      else { this._log('[chassis] 起点附近无安全格, 保持当前位置'); return []; }
+    }
+    // 目标格不安全 → 搜索最近安全目标格
     if (!this._isChassisPoseSafe(wx(gx), wy(gy))) {
       let found = null;
       for (let r = 1; r <= 30 && !found; r++) {
@@ -564,10 +602,7 @@ export class MockAgent {
         }
       }
       if (found) { gx = found.x; gy = found.y; }
-      else {
-        this._log('[chassis] 目标附近无安全格, 保持当前位置');
-        return [start];
-      }
+      else { this._log('[chassis] 目标附近无安全格, 保持当前位置'); return []; }
     }
     const key = (x, y) => `${x},${y}`;
     const open = [{ x: sx, y: sy, g: 0, f: Math.hypot(gx - sx, gy - sy) }];
@@ -599,7 +634,7 @@ export class MockAgent {
     const gk = key(gx, gy);
     if (!came.has(gk)) {
       this._log('[chassis] A*未找到完整路径, 保持当前位置');
-      return [start];
+      return [];
     }
     const cells = [];
     let k = gk;
@@ -609,7 +644,7 @@ export class MockAgent {
       k = came.get(k);
     }
     cells.reverse();
-    return this._simplifyChassisPath([start, ...cells]);
+    return this._simplifyChassisPath([{ x: startX, y: startY }, ...cells]);
   }
 
   _segmentChassisSafe(p1, p2) {
@@ -724,8 +759,8 @@ export class MockAgent {
     const startX0 = this.robot.root.position.x;
     const startY0 = this.robot.root.position.y;
     let waypoints = this._planChassisPath(x, y);
-    // 航点=起点 (A*失败或目标极近): 判断是否仅需近距离对齐
-    if (waypoints.length <= 1 && Math.hypot(waypoints[0].x - startX0, waypoints[0].y - startY0) < 0.01) {
+    // 空路径 = A*完全失败: 判断是否仅需近距离对齐
+    if (waypoints.length === 0) {
       const reqDist = Math.hypot(x - startX0, y - startY0);
       if (reqDist < 0.05) {
         const safe = this._nearestSafeChassisPoint(x, y) || { x, y };

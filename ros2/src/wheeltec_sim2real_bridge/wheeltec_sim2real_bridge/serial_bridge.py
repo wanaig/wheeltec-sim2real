@@ -27,6 +27,13 @@ loop arm feedback, not measured encoder feedback.
 import math
 from typing import Iterable, List, Optional, Sequence, Tuple
 
+# 机器人上 noetic + foxy 共存, 需移除 noetic 的 Python 包路径,
+# 否则 import sensor_msgs/nav_msgs 会解析为 ROS1 版本 (缺少 _TYPE_SUPPORT)
+import sys as _sys
+for _p in list(_sys.path):
+    if 'noetic' in _p or 'ros1' in _p:
+        _sys.path.remove(_p)
+
 import rclpy
 from geometry_msgs.msg import Pose, TransformStamped, Twist
 from nav_msgs.msg import Odometry

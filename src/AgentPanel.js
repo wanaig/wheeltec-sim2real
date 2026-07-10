@@ -476,13 +476,19 @@ export class AgentPanel {
       const payload = JSON.parse(data);
       const objects = Array.isArray(payload.objects) ? payload.objects : [];
       // 注入真实检测结果到 MockAgent (同步 3D 场景 + this.tools, sim2real 闭环)
+      // 只接受有 position_world_m 的检测结果 (TF 变换成功的世界坐标)
+      // TF 失败时的 camera-frame 坐标不能作为世界坐标, 否则物体位置完全错误
       if (this._mockAgent) {
+        const validObjs = objects.filter(o => Array.isArray(o.position_world_m) && o.position_world_m.length === 3);
+        if (validObjs.length < objects.length && validObjs.length === 0) {
+          this._pushLog(`[perception] ⚠ ${objects.length - validObjs.length} 个物体无世界坐标 (TF 变换失败), 跳过`);
+        }
         this._mockAgent.setRealAnnotations(
-          objects.filter(o => o.position_world_m || o.position_table_m).map(o => ({
+          validObjs.map(o => ({
             class: o.class || 'unknown',
             class_cn: o.class_cn,
             confidence: o.confidence,
-            position_world_m: o.position_world_m || o.position_table_m,
+            position_world_m: o.position_world_m,
             bbox_xywh: o.bbox_xywh,
           }))
         );
@@ -490,9 +496,11 @@ export class AgentPanel {
       this._objects = objects.map(o => ({
         class: o.class_cn || o.class || 'unknown',
         conf: o.confidence,
-        xyz: Array.isArray(o.position_table_m)
-          ? o.position_table_m.map(v => Number(v).toFixed(3)).join(', ')
-          : '',
+        xyz: Array.isArray(o.position_world_m)
+          ? o.position_world_m.map(v => Number(v).toFixed(3)).join(', ')
+          : (Array.isArray(o.position_table_m)
+            ? o.position_table_m.map(v => Number(v).toFixed(3)).join(', ') + ' [cam]'
+            : 'N/A'),
         bbox: Array.isArray(o.bbox_xywh) ? o.bbox_xywh.join(',') : '',
         real: true,
       }));

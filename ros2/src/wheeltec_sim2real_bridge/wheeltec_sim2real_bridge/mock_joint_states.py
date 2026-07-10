@@ -14,6 +14,10 @@ mock_joint_states.py — 无真机时的 sim2real 闭环测试节点 (ROS2)
     ros2 launch wheeltec_sim2real_bridge sim2real_bridge.launch.py mock:=true
 """
 import math
+import sys as _sys
+for _p in list(_sys.path):
+    if 'noetic' in _p or 'ros1' in _p:
+        _sys.path.remove(_p)
 
 import rclpy
 from rclpy.node import Node

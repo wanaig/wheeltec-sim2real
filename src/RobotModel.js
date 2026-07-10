@@ -539,7 +539,10 @@ export class RobotModel {
     g.getWorldQuaternion(link5Quat);
 
     // Mount offset in link5 frame → world frame
-    const mountEuler = new THREE.Euler(mount.roll, mount.pitch, mount.yaw, 'XYZ');
+    // ROS static_transform_publisher 用 extrinsic RPY (R = Rz(yaw)·Ry(pitch)·Rx(roll))
+    // Three.js Euler 'ZYX' = intrinsic ZYX = 同样的 R = Rz(z)·Ry(y)·Rx(x)
+    // 所以 Euler(roll, pitch, yaw, 'ZYX') = ROS rpy(roll, pitch, yaw)
+    const mountEuler = new THREE.Euler(mount.roll, mount.pitch, mount.yaw, 'ZYX');
     const mountQuat = new THREE.Quaternion().setFromEuler(mountEuler);
     const worldMountQuat = link5Quat.clone().multiply(mountQuat);
     const mountOffset = new THREE.Vector3(mount.x, mount.y, mount.z).applyQuaternion(link5Quat);

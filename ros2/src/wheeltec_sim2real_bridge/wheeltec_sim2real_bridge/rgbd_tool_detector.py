@@ -41,11 +41,18 @@ import sys
 import time
 from typing import Optional
 
+# -- 机器人上 noetic + foxy 共存, noetic 的 Python 包在系统级 sys.path 中,
+#    会导致 import sensor_msgs 解析为 ROS1 版本 (缺少 _TYPE_SUPPORT).
+#    必须在 import ROS2 消息类型之前移除 noetic 路径.
+for _p in list(sys.path):
+    if 'noetic' in _p or 'ros1' in _p:
+        sys.path.remove(_p)
+
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
-from sensor_msgs.msg import CameraInfo, CompressedImage, Image
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image, JointState
 from std_msgs.msg import String
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
@@ -54,6 +61,25 @@ try:
     import cv2
 except ImportError:
     cv2 = None
+
+
+# URDF 机械臂关节定义 (base_link → link5)
+# 用于 TF 不可用时 fallback FK 坐标变换
+# (name, origin_xyz, axis) — axis 已归一化, angle = joint value
+ARM_JOINTS_FK = [
+    ('joint1', [0.054476, 0.00070272, 0.156], [0, 0, -1]),
+    ('joint2', [0.0005, 0.0227, 0.0315], [0, -1, 0]),
+    ('joint3', [0, 0.001, 0.105], [0, 1, 0]),
+    ('joint4', [0.0010378, -0.0015, 0.0975], [0, 1, 0]),
+    ('joint5', [-0.027, -0.0222, 0.0432], [0, 0, -1]),
+]
+
+# camera_link (X前 Y左 Z上) → camera_color_optical_frame (X右 Y下 Z前)
+OPTICAL_ROTATION = np.array([
+    [0, 0, 1],
+    [-1, 0, 0],
+    [0, -1, 0],
+], dtype=np.float64)
 
 
 # COCO 80-class names (YOLOv5/v8 default)
@@ -163,6 +189,14 @@ class RgbdToolDetector(Node):
         self.declare_parameter('yolo_imgsz', 640)
         self.declare_parameter('yolo_local_repo', '/home/wheeltec/yolov5-pytorch')
 
+        # -- Fallback FK 参数 (TF 不可用时自己算坐标变换) --
+        self.declare_parameter('hand_cam_x', 0.05)
+        self.declare_parameter('hand_cam_y', 0.0)
+        self.declare_parameter('hand_cam_z', 0.03)
+        self.declare_parameter('hand_cam_roll', 0.0)
+        self.declare_parameter('hand_cam_pitch', -0.3)
+        self.declare_parameter('hand_cam_yaw', 0.0)
+
         # Read parameters
         self.rgb_topic = str(self.get_parameter('rgb_topic').value)
         self.depth_topic = str(self.get_parameter('depth_topic').value)
@@ -176,6 +210,12 @@ class RgbdToolDetector(Node):
         self.yolo_conf = float(self.get_parameter('yolo_conf').value)
         self.yolo_device = str(self.get_parameter('yolo_device').value)
         self.yolo_imgsz = int(self.get_parameter('yolo_imgsz').value)
+        self.hand_cam_x = float(self.get_parameter('hand_cam_x').value)
+        self.hand_cam_y = float(self.get_parameter('hand_cam_y').value)
+        self.hand_cam_z = float(self.get_parameter('hand_cam_z').value)
+        self.hand_cam_roll = float(self.get_parameter('hand_cam_roll').value)
+        self.hand_cam_pitch = float(self.get_parameter('hand_cam_pitch').value)
+        self.hand_cam_yaw = float(self.get_parameter('hand_cam_yaw').value)
 
         # State
         self._rgb_msg: Optional[Image] = None
@@ -199,6 +239,10 @@ class RgbdToolDetector(Node):
             self.create_subscription(Image, self.depth_topic, self._on_depth, 10)
 
         self.create_subscription(CameraInfo, self.info_topic, self._on_info, 10)
+
+        # /joint_states 订阅 (fallback FK 用: TF 不可用时自己算 base_link→link5 变换)
+        self._joint_states = {}
+        self.create_subscription(JointState, '/joint_states', self._on_joint_states, 10)
 
         # Publishers
         self.annotations_pub = self.create_publisher(
@@ -350,38 +394,50 @@ class RgbdToolDetector(Node):
     # TF transform
     # ------------------------------------------------------------------
     def _transform_to_world(self, x, y, z, camera_frame):
-        """Transform a 3D point from camera optical frame to self.world_frame via TF.
+        """Transform a 3D point from camera optical frame to self.world_frame.
 
-        Returns [x, y, z] in world frame, or None if TF is unavailable.
+        优先用 TF (tf2_ros), TF 不可用时用 fallback FK (URDF 关节 + mount 参数).
+        Returns [x, y, z] in world frame, or None if both fail.
         """
+        # 方法 1: TF 查询
         try:
             tf = self._tf_buffer.lookup_transform(
                 self.world_frame, camera_frame, Time())
+            self._tf_available = True
+            t = tf.transform.translation
+            q = tf.transform.rotation
+            qx, qy, qz, qw = q.x, q.y, q.z, q.w
+            r11 = 1 - 2 * (qy * qy + qz * qz)
+            r12 = 2 * (qx * qy - qz * qw)
+            r13 = 2 * (qx * qz + qy * qw)
+            r21 = 2 * (qx * qy + qz * qw)
+            r22 = 1 - 2 * (qx * qx + qz * qz)
+            r23 = 2 * (qy * qz - qx * qw)
+            r31 = 2 * (qx * qz - qy * qw)
+            r32 = 2 * (qy * qz + qx * qw)
+            r33 = 1 - 2 * (qx * qx + qy * qy)
+            wx = r11 * x + r12 * y + r13 * z + t.x
+            wy = r21 * x + r22 * y + r23 * z + t.y
+            wz = r31 * x + r32 * y + r33 * z + t.z
+            return [round(float(wx), 4), round(float(wy), 4), round(float(wz), 4)]
         except Exception:
+            pass
+
+        # 方法 2: fallback FK (TF 不可用时, 自己算坐标变换)
+        result = self._fallback_transform(x, y, z)
+        if result is not None:
             if not self._tf_available:
                 self._warn_throttled(
-                    'TF %s -> %s not available, using camera-frame coords' % (
+                    'TF %s -> %s unavailable, using fallback FK (URDF + mount params)' % (
                         camera_frame, self.world_frame))
-            return None
-        self._tf_available = True
+                self._tf_available = True  # 标记为可用 (fallback 模式)
+            return result
 
-        t = tf.transform.translation
-        q = tf.transform.rotation
-        qx, qy, qz, qw = q.x, q.y, q.z, q.w
-        r11 = 1 - 2 * (qy * qy + qz * qz)
-        r12 = 2 * (qx * qy - qz * qw)
-        r13 = 2 * (qx * qz + qy * qw)
-        r21 = 2 * (qx * qy + qz * qw)
-        r22 = 1 - 2 * (qx * qx + qz * qz)
-        r23 = 2 * (qy * qz - qx * qw)
-        r31 = 2 * (qx * qz - qy * qw)
-        r32 = 2 * (qy * qz + qx * qw)
-        r33 = 1 - 2 * (qx * qx + qy * qy)
-
-        wx = r11 * x + r12 * y + r13 * z + t.x
-        wy = r21 * x + r22 * y + r23 * z + t.y
-        wz = r31 * x + r32 * y + r33 * z + t.z
-        return [round(float(wx), 4), round(float(wy), 4), round(float(wz), 4)]
+        if not self._tf_available:
+            self._warn_throttled(
+                'TF %s -> %s not available and no /joint_states, cannot transform' % (
+                    camera_frame, self.world_frame))
+        return None
 
     # ------------------------------------------------------------------
     # Callbacks
@@ -394,6 +450,69 @@ class RgbdToolDetector(Node):
 
     def _on_info(self, msg: CameraInfo) -> None:
         self._info_msg = msg
+
+    def _on_joint_states(self, msg: JointState) -> None:
+        for i, name in enumerate(msg.name):
+            if i < len(msg.position):
+                self._joint_states[name] = float(msg.position[i])
+
+    @staticmethod
+    def _axis_angle_to_matrix(axis, angle):
+        """Rodrigues 旋转公式: 绕单位轴 axis 旋转 angle 弧度的 3×3 旋转矩阵"""
+        ax, ay, az = axis
+        c, s = math.cos(angle), math.sin(angle)
+        t = 1 - c
+        return np.array([
+            [t*ax*ax + c,    t*ax*ay - s*az, t*ax*az + s*ay],
+            [t*ax*ay + s*az, t*ay*ay + c,    t*ay*az - s*ax],
+            [t*ax*az - s*ay, t*ay*az + s*ax, t*az*az + c],
+        ], dtype=np.float64)
+
+    @staticmethod
+    def _rpy_to_matrix(roll, pitch, yaw):
+        """extrinsic RPY → 3×3 旋转矩阵: R = Rz(yaw)·Ry(pitch)·Rx(roll)"""
+        cr, sr = math.cos(roll), math.sin(roll)
+        cp, sp = math.cos(pitch), math.sin(pitch)
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        Rx = np.array([[1,0,0],[0,cr,-sr],[0,sr,cr]], dtype=np.float64)
+        Ry = np.array([[cp,0,sp],[0,1,0],[-sp,0,cp]], dtype=np.float64)
+        Rz = np.array([[cy,-sy,0],[sy,cy,0],[0,0,1]], dtype=np.float64)
+        return Rz @ Ry @ Rx
+
+    def _fallback_transform(self, x, y, z):
+        """TF 不可用时的 fallback: 用 FK + mount 参数计算 camera_color_optical_frame → base_link 变换.
+
+        变换链: base_link → joint1..5 → link5 → [mount] → camera_link → [optical] → optical_frame
+        返回 [wx, wy, wz] in base_link, 或 None 如果 /joint_states 无数据.
+        """
+        if not self._joint_states:
+            return None
+
+        # 1. FK: base_link → link5 (累乘关节变换)
+        T = np.eye(4, dtype=np.float64)
+        for name, origin, axis in ARM_JOINTS_FK:
+            angle = self._joint_states.get(name, 0.0)
+            T_j = np.eye(4, dtype=np.float64)
+            T_j[:3, 3] = origin
+            T_j[:3, :3] = self._axis_angle_to_matrix(axis, angle)
+            T = T @ T_j
+
+        # 2. link5 → camera_link (mount offset: translation + extrinsic RPY)
+        T_mount = np.eye(4, dtype=np.float64)
+        T_mount[:3, 3] = [self.hand_cam_x, self.hand_cam_y, self.hand_cam_z]
+        T_mount[:3, :3] = self._rpy_to_matrix(
+            self.hand_cam_roll, self.hand_cam_pitch, self.hand_cam_yaw)
+        T = T @ T_mount
+
+        # 3. camera_link → camera_color_optical_frame (光学坐标系旋转)
+        T_opt = np.eye(4, dtype=np.float64)
+        T_opt[:3, :3] = OPTICAL_ROTATION
+        T = T @ T_opt
+
+        # 4. 变换点 (optical frame → base_link)
+        p = np.array([x, y, z, 1.0], dtype=np.float64)
+        result = T @ p
+        return [round(float(result[0]), 4), round(float(result[1]), 4), round(float(result[2]), 4)]
 
     def _warn_throttled(self, text: str) -> None:
         now = time.time()
@@ -439,7 +558,11 @@ class RgbdToolDetector(Node):
                 raise ValueError('failed to decode compressed depth image')
             if img.dtype == np.uint16:
                 return img.astype(np.float32) * 0.001
-            return img.astype(np.float32)
+            # uint8 depth (JPEG compressed) — 不能直接当 float 用, 值 0~255 不是米
+            self._warn_throttled(
+                'depth compressed is 8-bit (JPEG), expected 16-bit PNG. '
+                'depth values will be incorrect. Check republish format.')
+            return img.astype(np.float32) * 0.001  # 假设 mm, 但 8-bit 精度很差
 
         h, w = int(msg.height), int(msg.width)
         enc = (msg.encoding or '').lower()
@@ -548,7 +671,7 @@ class RgbdToolDetector(Node):
                     round(y_cam, 4) if np.isfinite(y_cam) else None,
                     round(z_cam, 4) if np.isfinite(z_cam) else None,
                 ]
-                table_pos = cam_pos
+                table_pos = None  # TF 失败: 没有世界坐标, 不能用 camera-frame coords 误导
             else:
                 table_pos = world_pos
 
@@ -618,6 +741,19 @@ class RgbdToolDetector(Node):
         self.annotations_pub.publish(msg)
         self._publish_debug(debug)
         self._publish_depth_viz(depth)
+
+        # Debug: 打印第一个物体的坐标变换结果 (帮助诊断"物体飞到天上"问题)
+        if objects:
+            o = objects[0]
+            self.get_logger().debug(
+                'DETCTOR coord: %s depth=%.3f cam=%s world=%s tf_ok=%s frame=%s' % (
+                    o.get('class', '?'),
+                    o.get('depth_m', -1),
+                    o.get('position_camera_m'),
+                    o.get('position_world_m'),
+                    self._tf_available,
+                    payload['frame_id'],
+                ))
 
     def _publish_debug(self, bgr) -> None:
         ok, jpg = cv2.imencode('.jpg', bgr, [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality])

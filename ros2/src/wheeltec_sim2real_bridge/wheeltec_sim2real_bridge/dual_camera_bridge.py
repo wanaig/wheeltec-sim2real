@@ -14,6 +14,10 @@ import time
 import os
 import glob
 import re
+import sys as _sys
+for _p in list(_sys.path):
+    if 'noetic' in _p or 'ros1' in _p:
+        _sys.path.remove(_p)
 from typing import Optional, Set
 
 import rclpy
