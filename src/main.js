@@ -15,6 +15,8 @@ import { MockAgent } from './MockAgent.js';
 import { RealEnvView } from './RealEnvView.js';
 import { MCPToolExecutor, MCP_TOOLS } from './MCPTools.js';
 import { LangGraphAgent } from './LangGraphAgent.js';
+import { InstructionParser } from './InstructionParser.js';
+import { TaskDecomposer } from './TaskDecomposer.js';
 // 原生 fetch + function-calling 实现, 保留作 fallback (注释切换即可):
 // import { LLMAgent } from './LLMAgent.js';
 
@@ -84,6 +86,8 @@ async function main() {
   mcpExecutor.onToolResult = (name, result) => {
     if (name === 'perceive') agentPanel.updateObjects(result);
   };
+  // perceive(query) → 下发自然语言 prompt 到 Jetson LocateAnything 客户端
+  mcpExecutor.onLocateQuery = (query) => agentPanel.publishLocateQuery(query);
 
   // 7.9 LLM 大模型智能体 (基于 LangGraph StateGraph: agent↔tools 循环)
   // 接口与 LLMAgent 一致, 可直接换回 new LLMAgent({...}) 作原生模式
@@ -99,6 +103,20 @@ async function main() {
   // 注入到 MockAgent (双模式切换: 有API Key走LLM, 无则走正则)
   mockAgent.setLLMAgent(llmAgent);
   agentPanel.setLLMAgent(llmAgent);
+
+  // 7.10 指令解析模块 (LLM 云端 API / 本地外置机 + 正则回退)
+  //     解析自然语言指令 → {action, target_tool, side, slot, query}
+  //     query 经 /locate/query 下发到 Jetson locate_anything_client → 外置 LocateAnything
+  const instructionParser = new InstructionParser({
+    apiBase: localStorage.getItem('llm_api_base') || 'https://api.openai.com/v1',
+    apiKey: localStorage.getItem('llm_api_key') || '',
+    model: localStorage.getItem('llm_model') || 'gpt-4o',
+  });
+  agentPanel.setInstructionParser(instructionParser);
+
+  // 7.11 任务序列分解模块 (将解析后的指令分解为显式步骤列表, 供面板可视化)
+  const taskDecomposer = new TaskDecomposer();
+  agentPanel.setTaskDecomposer(taskDecomposer);
 
   // 8. 渲染循环
   let lastJointPub = 0;

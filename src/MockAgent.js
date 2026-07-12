@@ -1121,18 +1121,18 @@ export class MockAgent {
   }
 
   // ─── 主入口 (LLM 模式 / 正则 NLU 回退) ───
-  async run(instruction) {
+  async run(instruction, parsedPlan = null) {
     if (this._busy) return;
     this._busy = true;
 
     this._log(`>>> 指令: ${instruction}`);
     this._setStatus('running', instruction);
 
-    // 无 API Key → 正则 NLU 模式
+    // 无 API Key → 正则 NLU 模式 (parsedPlan 可直接复用, 跳过正则解析)
     if (!this._llmAgent || !this._llmAgent.apiKey) {
       this._log('[NLU] 未配置 API Key, 启动正则指令解析模式');
       try {
-        await this.runNLU(instruction);
+        await this.runNLU(instruction, parsedPlan);
       } catch (e) {
         this._log(`[NLU] 异常: ${e.message}`);
         this._setStatus('failed', e.message);
@@ -1143,7 +1143,7 @@ export class MockAgent {
 
     this._log('[LLM] 启动大模型决策模式');
     try {
-      const result = await this._llmAgent.run(instruction);
+      const result = await this._llmAgent.run(instruction, parsedPlan);
       if (result.ok) {
         this._log(`<<< 结果: done (${result.turns}轮对话)`);
         this._setStatus('done', result.summary);
@@ -1207,8 +1207,10 @@ export class MockAgent {
   }
 
   /** 正则 NLU 模式: 解析指令 → 脚本化执行 */
-  async runNLU(instruction) {
-    const plan = this.parseInstruction(instruction);
+  async runNLU(instruction, parsedPlan = null) {
+    const plan = parsedPlan && parsedPlan.ok
+      ? { action: parsedPlan.action, toolClass: parsedPlan.target_tool, side: parsedPlan.side, slot: parsedPlan.slot }
+      : this.parseInstruction(instruction);
     if (!plan) {
       this._log('[NLU] 无法解析指令, 请使用格式如: "取出左侧的扳手" 或 "把滚柱放到料箱第三格"');
       this._setStatus('failed', '指令无法解析');

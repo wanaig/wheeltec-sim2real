@@ -166,8 +166,10 @@ function buildToolSchemas() {
     });
   return [
     mk('perceive',
-      '感知当前场景中所有可见的工具和零件, 返回类别、世界坐标(x,y,z米)、置信度。仅在工具未被抓取时可见。',
-      z.object({}).describe('无参数')),
+      '感知当前场景中所有可见的工具和零件, 返回类别、世界坐标(x,y,z米)、置信度、可达性。可选传入 query 自然语言目标(如"蓝色方形工件")触发外置 LocateAnything 开放词汇检测并定位目标; 不传则返回最近一次真实检测结果或虚拟场景。',
+      z.object({
+        query: z.string().optional().describe('自然语言目标描述, 如 "蓝色方形工件"/"红色圆柱螺丝"。传入则下发外置 LocateAnything 定位目标。'),
+      })),
     mk('move_base',
       '驱动底盘导航到指定世界坐标 (x, y) 米, 朝向 yaw 弧度。底盘移动后臂的可达范围改变。用于目标超出臂展时靠近目标。',
       z.object({
@@ -556,7 +558,7 @@ export class LangGraphAgent {
    * @param {string} instruction — 用户自然语言指令
    * @returns {Promise<{ok: boolean, summary: string, turns: number}>}
    */
-  async run(instruction) {
+  async run(instruction, parsedPlan = null) {
     if (!this.apiKey) {
       return { ok: false, summary: '未配置 API Key, 请在面板中设置', turns: 0 };
     }
@@ -567,11 +569,14 @@ export class LangGraphAgent {
     this._aborted = false;
     this._abortCtrl = new AbortController();
     this._instruction = instruction;
+    this._parsedPlan = parsedPlan;
     this._rebuildModel();
 
     const init = {
       messages: [
         new SystemMessage(SYSTEM_PROMPT),
+        ...(parsedPlan && parsedPlan.ok ? [new HumanMessage(
+          `[指令已解析] 动作=${parsedPlan.action} 目标工具=${parsedPlan.target_tool || '未指定(按query定位)'} 位置=${parsedPlan.side || '任意'} 料箱格=${parsedPlan.slot || '无'} 视觉定位query="${parsedPlan.query}"。\n请严格按此解析结果执行: perceive 调用时传 query="${parsedPlan.query}" 定位目标; ${parsedPlan.slot ? `放置到料箱第${parsedPlan.slot}格; ` : ''}动作=${parsedPlan.action === 'grasp' ? '抓取' : '放置'}。`)] : []),
         new HumanMessage(instruction),
       ],
       turns: 0,

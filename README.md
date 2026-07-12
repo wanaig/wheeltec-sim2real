@@ -271,6 +271,11 @@ npm run dev        # 浏览器打开 http://localhost:5173
 |------|------|------|
 | `astra_hand` | `false` | `true` 时拉起 Astra 手眼相机桥接链路 (ROS1 驱动 + ros1_bridge, 含 RGB+depth 流) |
 | `rgbd_detector` | `false` | `true` 时启动 YOLO+RGB-D 工业检测节点 (需 `astra_hand:=true` 提供 depth 流) |
+| `locate_anything` | `false` | `true` 时启动 LocateAnything 外置推理客户端 (**与 `rgbd_detector` 二选一**)。Jetson 把 RGB+自然语言 prompt 发到外置 RTX 上的 `server.py`, 收 2D bbox 后本地 depth+TF 做 2D→3D 反投影, 发同样的 `/industrial_tools/annotations`。需 `astra_hand:=true` + 外置机运行 `locate_anything_server/server.py` |
+| `la_server_url` | `http://192.168.0.100:8765` | 外置机 LocateAnything HTTP 服务地址 |
+| `la_http_timeout` | `3.0` | 外置机 HTTP 请求超时 (秒) |
+| `la_default_prompt` | `''` | 默认 prompt (空=不检测, 等前端发 `/locate/query`) |
+| `locate_query_topic` | `/locate/query` | 自然语言 prompt 输入话题 (前端 LLM `perceive(query)` 发布) |
 | `yolo_model` | `yolov8n.pt` | YOLO 模型文件 (COCO 预训练)。需 `pip install ultralytics`; 未安装时自动回退到 `yolov5s.pt` |
 | `yolo_conf` | `0.45` | YOLO 置信度阈值 |
 | `yolo_device` | `cuda:0` | YOLO 推理设备 (`cuda:0` / `cpu`) |
@@ -285,6 +290,9 @@ npm run dev        # 浏览器打开 http://localhost:5173
 ros2 launch wheeltec_sim2real_bridge bringup.launch.py echo_joint_states:=true
 # 真机 + Astra 手眼 + YOLO RGB-D 工业检测 (完整工业感知)
 ros2 launch wheeltec_sim2real_bridge bringup.launch.py astra_hand:=true rgbd_detector:=true echo_joint_states:=true
+# 真机 + Astra + LocateAnything 外置推理 (开放词汇 grounding, 跑在外置 RTX 上, 见下节)
+ros2 launch wheeltec_sim2real_bridge bringup.launch.py astra_hand:=true locate_anything:=true \
+  la_server_url:=http://192.168.0.100:8765 echo_joint_states:=true
 # 无硬件闭环测试
 ros2 launch wheeltec_sim2real_bridge bringup.launch.py mock:=true
 ```
@@ -391,6 +399,197 @@ base_link → joint1 → ... → joint5 → link5
 
 > **前端显示**: AgentPanel「检测物体」区域, 真实检测结果标注 `[YOLO]` 标签, 虚拟场景感知无标签。perceive 工具返回结果中 `real: true` 表示来自 YOLO+RGB-D。
 
+### LocateAnything 外置推理 (开放词汇 grounding)
+
+YOLO 用固定 COCO 80 类, 识别不了「蓝色方形工件」这类自然语言属性描述。`locate_anything` 链路换用 **NVIDIA LocateAnything-3B** (`nvidia/LocateAnything-3B`) 开放词汇 grounding 模型, 接收任意自然语言 prompt 输出目标 2D bbox。该模型 ~4B(BF16), Jetson Orin Nano 8GB 跑不动, 故**推理跑在外置 RTX 工控机上**, Jetson 只负责相机采集 + 2D→3D 反投影 + 运动控制。
+
+**为什么 3D 反投影留 Jetson**: depth 流 + TF 树 (`base_link←camera`) 都在小车上, 把一帧 JPEG 发出去、收回几个 bbox, 远比把 depth + 实时 TF 同步传给外置机便宜。重模型离板, 廉价几何运算在板。
+
+**架构 (三端分布式):**
+
+```
+PC 前端 (Vite+Three.js)              Jetson 小车 (ROS2 Foxy)           外置机 (RTX 工控机)
+─────────────────────              ──────────────────────────       ─────────────────────
+用户: "抓取蓝色方形工件"              Astra S RGB/depth/camera_info      LocateAnything-3B
+  │                                  │                                  (nvidia/LocateAnything-3B)
+  │ LLM 调 perceive(query=...)       │ /locate/query ◄── prompt          │
+  └─ /locate/query ─rosbridge──────►│ locate_anything_client            │
+                                     │  ── JPEG+prompt (HTTP) ───────► │ 推理: <box> 坐标
+                                     │  ◄── 2D bbox ────────────────── │
+                                     │ depth ROI 中值 + 内参 → camera 3D
+                                     │ TF: camera→base_link → XYZ
+                                     │ /industrial_tools/annotations ─►│
+  ◄── annotations (rosbridge) ──────┘                                  │
+  MockAgent.setRealAnnotations → 3D 场景同步
+  perceive 返回真实物体 → LLM 选目标
+  → plan_arm_motion → grasp → release → verify
+```
+
+**① 外置机 (RTX 工控机, Linux + NVIDIA GPU)**
+
+```bash
+cd locate_anything_server
+pip install -r requirements.txt   # transformers==4.57.1 peft decord lmdb + torch(按CUDA)
+# 提前下载模型 (离线部署, 约 8GB):
+huggingface-cli download nvidia/LocateAnything-3B --local-dir ./models/la-3b
+# 启动 (加载本地, 不联网):
+BACKEND=locateanything MODEL_PATH=./models/la-3b DEVICE=cuda:0 PORT=8765 python3 server.py
+# 验证: curl http://<外置机IP>:8765/health
+```
+
+后端可插拔 (`BACKEND=`): `locateanything` (生产) / `yoloworld` (ultralytics 开放词汇, 零配置验证全链路) / `groundingdino` (transformers)。`server.py` 暴露 `POST /detect {image_base64, prompt}` → `{boxes:[{bbox, class, confidence}]}`。
+
+**② Jetson 小车** — `locate_anything_client` 节点 (继承 `rgbd_tool_detector`, 复用全部图像解码/depth→3D/TF/发布逻辑, 仅把检测步骤换成 HTTP 调外置机):
+
+```bash
+ros2 launch wheeltec_sim2real_bridge bringup.launch.py \
+  astra_hand:=true locate_anything:=true \
+  la_server_url:=http://<外置机IP>:8765 echo_joint_states:=true
+```
+
+**③ PC 前端** — `npm run dev`, 浏览器内 LLM 输入「抓取蓝色方形工件」→ `perceive(query)` 自动经 `AgentPanel.publishLocateQuery` 发布 `/locate/query`, 等待外置检测回传 `/industrial_tools/annotations` 后注入 `MockAgent` 完成 sim2real 闭环。
+
+**与 YOLO 链路的差异:**
+
+| 项 | YOLO (`rgbd_detector`) | LocateAnything (`locate_anything`) |
+|----|------------------------|-------------------------------------|
+| 检测器 | 本地 YOLOv8/v5 (COCO 80 类) | 外置 LocateAnything-3B (开放词汇) |
+| 输入 | 无 (全场景检测) | 自然语言 prompt (`/locate/query`) |
+| 输出 | bbox + 类别 + 置信度 | bbox + prompt 文本 (无 per-box conf, 填 1.0) |
+| 算力位置 | Jetson 本地 GPU | 外置 RTX |
+| `annotations` 话题 | 相同格式 | 相同格式 (额外带 `query` 字段) |
+| 前端/工具链 | 不变 | 不变 (`perceive` 加可选 `query` 参数) |
+
+> **License**: nvidia/LocateAnything-3B 为 NVIDIA License, **仅非商业/学术研究**。模型含自定义代码, 需 `trust_remote_code=True`, 离线目录须保留其 `.py` 文件。不支持 TensorRT。硬件支持 Ampere/Hopper/Blackwell/Lovelace (A100/H100/L40/RTX 4090)。
+
+> **时序**: `perceive(query)` 发 prompt 后 `await 2.5s` 等 Jetson 周期检测 (5Hz) + HTTP 往返 + annotations 回传。若 LocateAnything-3B 推理 >2s, 调大 `MCPTools.js` `_perceive` 里的等待值。
+
+> **二选一**: `locate_anything:=true` 与 `rgbd_detector:=true` 不要同时启用 (会重复发 `/industrial_tools/annotations`)。
+
+### 自然语言指令理解 (InstructionParser)
+
+基于开源大模型的指令解析模块, 精准理解工业场景简单自然语言指令 (如「取出左侧的扳手」「帮我把滚柱放到料箱的第三个格子中」「抓取蓝色方形工件」), 提取核心需求 (目标工具、动作要求、位置、料箱格)。
+
+**为什么用开源 LLM 而非 BERT**: BERT 槽填充需训练工业指令样本, 工作量大且泛化弱; Qwen2.5-3B-Instruct 靠 few-shot prompt 即可输出结构化 JSON, 无需训练, 还能理解「蓝色方形工件」这类颜色+形状属性描述。模型与 LocateAnything-3B 同语言模型基座, 外置机权重复用性好。
+
+### 任务序列分解 (TaskDecomposer)
+
+将解析后的结构化指令 `{action, target_tool, side, slot, query}` 分解为显式任务步骤列表, 每步映射到对应 MCP 工具, 在 AgentPanel「任务分解」区域以步骤列表形式实时展示进度 (○ 待执行 / ◉ 执行中 / ✓ 完成 / ✗ 失败)。
+
+**分解逻辑** (以「把滚柱放到料箱第三格」为例):
+
+```
+步骤1  环境感知与目标定位          → perceive       识别场景工具, 定位滚柱世界坐标
+步骤2  可达性评估与底盘站位规划    → move_base      [可选] 若不可达, A*导航到最优站位
+步骤3  抓取路径规划与避障          → plan_arm_motion 多起始IK+碰撞检测+经由点轨迹
+步骤4  生成抓取姿态指令           → grasp          下降闭合夹爪抓取滚柱
+步骤5  机械臂安全收回             → retract        垂直抬升到安全高度
+步骤6  底盘导航至料箱区域         → move_base      [可选] 靠近料箱第3格
+步骤7  放置路径规划               → plan_arm_motion 规划到格子坐标
+步骤8  生成放置姿态指令           → release        张开夹爪放入第3格
+步骤9  机械臂安全收回             → retract        放置后抬升收回
+步骤10 放置结果验证               → verify         检查滚柱是否入格
+步骤11 失败自主感知与重试         → replan         [条件] 未入格则重新抓取放置
+```
+
+**进度跟踪**: LLM 模式从 `[MCP]` 日志解析工具调用/结果, NLU 模式从 `[nlu] 步骤N` 日志跟踪, 失败重试从 `[replan]` 日志触发步骤回退。步骤状态实时更新: ◉ 执行中 (脉冲动画) → ✓ 完成 / ✗ 失败, 演示视频中直观可见「感知→决策→执行→验证→重试」全流程。
+
+**模块**: `src/TaskDecomposer.js` (分解逻辑 + 日志解析工具方法)
+
+**输出结构**:
+
+```json
+{
+  "action": "grasp|place",              // 动作: 取/抓/拿=grasp, 放/放置=place
+  "target_tool": "wrench|roller|...|null", // 标准工具类 (5类), 无法映射=null
+  "side": "left|right|null",            // 位置: 左/右
+  "slot": 1-3|null,                     // 料箱格
+  "query": "蓝色方形工件",              // 视觉定位描述 (含颜色/形状), 供 LocateAnything
+  "source": "llm|regex"                 // 解析来源: LLM 或正则回退
+}
+```
+
+**后端可切换 (OpenAI 兼容, 一键切换)**:
+- ☁ **云端 API**: `apiBase = https://api.openai.com/v1` (或 DeepSeek/通义千问/智谱等 OpenAI 格式)
+- 🖥 **本地外置机**: `apiBase = http://<外置机IP>:11434/v1` (Ollama) 或 `:8001/v1` (vLLM), 本地大模型推理跑在外置 RTX 上, 与 LocateAnything 同理 (重推理离板)
+- 正则回退: 无 API Key 时用内置正则解析 (与 `MockAgent.parseInstruction` 一致)
+
+AgentPanel「大模型 + MCP 工具调用」配置区有快捷按钮: ☁云端 API / 🖥本地外置机 (填外置机 IP), 一键切换 apiBase/model。
+
+**与执行链结合 (独立解析 + 兼容现有 agent)**:
+
+```
+用户: "抓取蓝色方形工件"
+  │ InstructionParser.parse (LLM 云端/本地外置机, 或正则)
+  ├→ [NLU] 理解结果: 动作=grasp 目标=按query定位 query="蓝色方形工件"
+  ├→ publishLocateQuery(query) → /locate/query → Jetson locate_anything_client → 外置 LocateAnything
+  └→ mockAgent.run(text, plan):
+       LLM 模式: LangGraphAgent.run(text, plan) — plan 注入初始消息, 引导 perceive 用 plan.query 定位
+       正则模式: MockAgent.runNLU(text, plan) — 复用 plan, 跳过 parseInstruction
+```
+
+**外置机本地大模型 serving 部署** (`locate_anything_server/llm_serving/`):
+
+```bash
+cd locate_anything_server/llm_serving
+# 方式 A: vLLM (生产, 高吞吐, OpenAI 兼容 /v1)
+./download_qwen.sh      # 提前下载 Qwen2.5-3B-Instruct (~6GB, 离线部署)
+./start_vllm.sh         # 启动 :8001/v1, served-model-name=qwen2.5-3b-instruct
+# 方式 B: Ollama (快速验证, 易用, OpenAI 兼容 /v1)
+./start_ollama.sh       # 启动 :11434/v1, model=qwen2.5:3b
+```
+
+启动后前端点「🖥本地外置机」按钮填外置机 IP, 保存即切换。本地模式 apiKey 填任意非空串 (Ollama/vLLM 不校验 key)。两个 serving 与 `server.py` (LocateAnything, :8765) 并列跑, 端口不冲突。
+
+**模块**: `src/InstructionParser.js` (前端解析模块, OpenAI 兼容 `chat/completions` + JSON 输出 + 正则回退)。
+
+### 语音输入 (SenseVoice ASR)
+
+PTT (push-to-talk) 按住说话语音识别: 浏览器用 `MediaRecorder` 采集音频 (webm/opus), POST 到外置机 ASR 服务, 收到识别文本后自动填入指令框并触发 `InstructionParser` 解析 → agent 执行, 实现「语音 → 文本 → 理解 → 规划 → 执行」全语音链路。ASR 推理跑在外置 RTX 上, 与 LocateAnything / LLM serving 同理。
+
+**架构:**
+
+```
+浏览器 (🎤 按住说话)               外置机 (RTX)
+  │ MediaRecorder → webm/opus        │
+  │ POST /asr (multipart)  ─────────►│ SenseVoice-Small (FunASR)
+  │                                  │ ffmpeg webm→16kHz wav
+  │                                  │ 非自回归推理 (~70ms/10s 音频)
+  │◄────────── {text, language,      │ emotion, event, latency_ms}
+  │   emotion/event (SenseVoice 特色)│
+  ▼
+InstructionParser.parse(text) → {action, target_tool, side, slot, query}
+  └→ mockAgent.run(text, plan) → 感知 → 规划 → 抓取 → 放置 → 验证
+```
+
+**外置机 ASR 服务部署** (`locate_anything_server/asr_server/`):
+
+```bash
+cd locate_anything_server/asr_server
+pip install -r requirements.txt   # funasr + modelscope + torch + torchaudio
+# 系统依赖: ffmpeg (用于 webm→wav 转码), sudo apt install ffmpeg
+# 提前下载模型 (离线部署, ~900MB):
+./download_sensevoice.sh          # ModelScope → iic/SenseVoiceSmall → ./models/sensevoice
+# 启动:
+./start_asr.sh                    # BACKEND=sensevoice DEVICE=cuda:0 PORT=8766
+# 验证: curl http://<外置机IP>:8766/health
+```
+
+后端可插拔 (`BACKEND=`): `sensevoice` (默认, 阿里 FunASR, 50+ 语言 + 情绪 + 音频事件) / `whisper` (faster-whisper CTranslate2, fallback)。`server.py` 暴露 `POST /asr` (multipart file) 和 `POST /asr_base64` → `{text, language, emotion, event, latency_ms}`。
+
+**端口规划 (外置机):**
+
+| 端口 | 服务 | 说明 |
+|------|------|------|
+| 8765 | LocateAnything | 视觉定位 (2D bbox) |
+| 8766 | SenseVoice ASR | 语音识别 (文本) |
+| 8001 | vLLM | 本地 LLM (OpenAI 兼容) |
+| 11434 | Ollama | 本地 LLM (OpenAI 兼容) |
+
+前端 AgentPanel 指令输入框旁有 🎤 麦克风按钮, **按住说话、松开发送**。ASR 地址自动复用 LLM 配置区的外置机 IP (`:8766`), 无需单独配置。浏览器要求 HTTPS 或 localhost 才能访问麦克风 (本地 `npm run dev` 可直接用)。
+
+**模块**: `src/SpeechRecognizer.js` (PTT 录音 + 上传, 状态回调 idle/recording/processing)
+
 ## LLM 智能体自主作业系统
 
 浏览器内置一套完整的「自然语言 → 自主作业」系统,无需真机即可演示,也可下写真机执行。入口在画面右侧「🤖 交互型智能体」面板。
@@ -408,7 +607,7 @@ base_link → joint1 → ... → joint5 → link5
 
 | 工具 | 功能 |
 |------|------|
-| `perceive` | 感知场景中所有可见工具/零件,返回类别、世界坐标、距离、可达性;不可达时附带 `suggested_chassis`。**数据源自动切换**:有真实 YOLO+RGB-D 检测结果 (5s 内, `/industrial_tools/annotations`) 时用真实数据,否则回退虚拟场景 |
+| `perceive` | 感知场景中所有可见工具/零件,返回类别、世界坐标、距离、可达性;不可达时附带 `suggested_chassis`。**可选 `query` 参数** (如"蓝色方形工件") 触发外置 LocateAnything 开放词汇检测:经 `/locate/query` 下发到 Jetson `locate_anything_client`, 等待 `/industrial_tools/annotations` 回传后返回真实目标。**数据源自动切换**:有真实检测结果 (5s 内, `/industrial_tools/annotations`) 时用真实数据,否则回退虚拟场景 |
 | `get_scene_info` | 返回双工作台位置、料箱格子坐标、臂展范围、碰撞盒、安全高度 |
 | `get_robot_state` | 返回底盘位姿、臂关节角、夹爪状态、TCP 世界坐标 |
 | `move_base` | 底盘导航到世界坐标(x,y,yaw),先自动收回机械臂到安全高度再 A* 路径规划避障行驶 |
@@ -435,6 +634,7 @@ base_link → joint1 → ... → joint5 → link5
 | 订阅 | `/agent/status` | std_msgs/String (JSON `{status, info}`) | 顶部大字幕横幅(运行中/完成/失败) |
 | 订阅 | `/agent/log` | std_msgs/String | 逐步日志 + 阶段字幕(感知/决策/执行/重试) |
 | 发布 | `/agent/instruction` | std_msgs/String | 自然语言指令输入 |
+| 发布 | `/locate/query` | std_msgs/String | LocateAnything 自然语言 prompt (perceive(query) → Jetson locate_anything_client → 外置机) |
 
 无 ROS 连接时,面板自动切到 Mock 模式,直接驱动浏览器内 `MockAgent` 跑全流程,日志/字幕/状态全部本地回显,适合演示视频录制。
 
@@ -487,6 +687,9 @@ wheeltec-sim2real/
 │   ├── DatasetGenerator.js    # ★ 多视角渲染 + YOLO 标注 + 批量下载
 │   ├── AgentPanel.js          # ★ 交互型智能体面板 (字幕 + 日志 + 指令 + LLM 配置)
 │   ├── UIController.js        # DOM 控件绑定 (含 ROS 版本切换 + 相机面板)
+│   ├── InstructionParser.js  # ★ 自然语言指令解析 (LLM 云端/本地 + 正则回退, 输出 action/tool/side/slot/query)
+│   ├── TaskDecomposer.js     # ★ 任务序列分解 (解析结果→显式步骤列表, 映射MCP工具, 实时进度跟踪)
+│   ├── SpeechRecognizer.js   # ★ 语音识别 (PTT 按住说话, MediaRecorder→外置 SenseVoice ASR)
 │   ├── main.js                # 入口, 装配所有模块
 │   └── style.css              # 样式
 ├── ros2/                 # ROS2 工作空间 (sim2real 真机端)
@@ -501,13 +704,32 @@ wheeltec-sim2real/
 │       └── wheeltec_sim2real_bridge/      # 串口桥接包 (移植自 ROS1 wheeltec_arm_six.cpp)
 │           ├── wheeltec_sim2real_bridge/
 │           │   ├── serial_bridge.py       # 真机串口桥接: cmd_vel/voice_joint_states→STM32, 串口→odom/imu
-│           │   └── mock_joint_states.py   # 无硬件 mock (回显 /joint_states + odom + 测试相机)
+│           │   ├── mock_joint_states.py   # 无硬件 mock (回显 /joint_states + odom + 测试相机)
+│           │   ├── dual_camera_bridge.py  # 双 USB 摄像头 → CompressedImage (eye_in_hand / eye_to_hand)
+│           │   ├── rgbd_tool_detector.py  # ★ YOLO+RGB-D 工业检测 (本地 YOLO, depth→3D→TF→annotations)
+│           │   └── locate_anything_client.py # ★ LocateAnything 外置推理客户端 (HTTP 调外置机, 本地 2D→3D)
 │           ├── launch/
 │           │   ├── bringup.launch.py      # ★ 总启动: URDF/TF + 串口/mock + rosbridge 一条命令
 │           │   ├── sim2real_bridge.launch.py
 │           │   └── rosbridge_websocket.launch.py
 │           ├── config/params.yaml         # 串口/帧ID 参数
 │           └── package.xml / setup.py
+├── locate_anything_server/   # ★ 外置机 LocateAnything 推理服务 (独立, 不依赖 ROS)
+│   ├── server.py             # FastAPI HTTP: POST /detect {image_base64, prompt} → {boxes}
+│   ├── backends.py           # 可插拔后端: LocateAnything-3B / YOLO-World / GroundingDINO
+│   ├── requirements.txt      # transformers==4.57.1 peft decord lmdb + torch
+│   ├── start_locate.sh       # ★ 启动 LocateAnything (:8765, 自动检测 models/la-3b)
+│   ├── DEPLOY.md             # ★ 外置机完整部署文档 (依赖/模型下载/启动/故障排查)
+│   ├── llm_serving/          # ★ 本地大模型 serving (OpenAI 兼容, 推理在 RTX)
+│       ├── start_vllm.sh     # vLLM Qwen2.5-3B-Instruct (:8001/v1)
+│       ├── start_ollama.sh   # Ollama qwen2.5:3b (:11434/v1)
+│       └── download_qwen.sh  # 提前下载 Qwen2.5-3B-Instruct 权重
+├── locate_anything_server/asr_server/  # ★ 外置机语音识别服务 (SenseVoice, :8766, 独立)
+│   ├── server.py             # FastAPI: POST /asr (multipart) → {text, language, emotion, event}
+│   ├── backends.py           # 可插拔后端: SenseVoice (FunASR) / Whisper (faster-whisper)
+│   ├── requirements.txt      # funasr + modelscope + torch + torchaudio
+│   ├── start_asr.sh          # 启动 SenseVoice ASR (:8766)
+│   └── download_sensevoice.sh # 提前下载 iic/SenseVoiceSmall
 ├── index.html
 ├── vite.config.js
 └── package.json
@@ -575,5 +797,7 @@ ros2 launch wheeltec_sim2real_bridge bringup.launch.py mock:=true
 | 仿真→真机 | `voice_joint_states` | sensor_msgs/JointState · sensor_msgs/msg/JointState | 机械臂目标关节角 |
 | 仿真→真机 | `cmd_vel` | geometry_msgs/Twist · geometry_msgs/msg/Twist | 底盘速度指令 |
 | 仿真↔智能体 | `/agent/status` `/agent/log` `/agent/instruction` | std_msgs/String · std_msgs/msg/String | 智能体状态/日志/指令 |
+| 仿真→Jetson | `/locate/query` | std_msgs/String · std_msgs/msg/String | LocateAnything 自然语言 prompt (perceive(query) → 外置推理) |
+| Jetson→仿真 | `/industrial_tools/annotations` | std_msgs/String · std_msgs/msg/String | YOLO/LocateAnything 检测结果 JSON (类别+世界坐标+bbox) |
 
 > `voice_joint_states` 是 WHEELTEC 系统中 `preset.cpp` / `voice_control.cpp` 使用的机械臂控制话题, 串口节点订阅此话题将指令下发至下位机。ROS2 版 `wheeltec_sim2real_bridge/serial_bridge.py` 沿用同一话题名与 6 值顺序 `[joint1..joint5, joint6(夹爪)]`, 帧格式 (0xAA 帧头 / XOR 校验 / ×1000 定点) 与 STM32 下位机完全一致。

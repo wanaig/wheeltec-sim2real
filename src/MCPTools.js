@@ -191,8 +191,14 @@ export const MCP_TOOLS = [
     type: 'function',
     function: {
       name: 'perceive',
-      description: '感知当前场景中所有可见的工具和零件, 返回类别、世界坐标(x,y,z米)、置信度。仅在工具未被抓取时可见。',
-      parameters: { type: 'object', properties: {}, required: [] },
+      description: '感知当前场景中所有可见的工具和零件, 返回类别、世界坐标(x,y,z米)、置信度、可达性。可选传入 query 自然语言目标(如"蓝色方形工件")触发外置 LocateAnything 开放词汇检测; 不传则返回最近一次真实检测结果或虚拟场景。',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: '自然语言目标描述, 如 "蓝色方形工件"/"红色圆柱螺丝"。传入则下发到外置 LocateAnything 推理服务定位目标物体。' },
+        },
+        required: [],
+      },
     },
   },
   {
@@ -549,7 +555,7 @@ export class MCPToolExecutor {
 
   async _dispatch(name, p) {
     switch (name) {
-      case 'perceive':         return this._perceive();
+      case 'perceive':         return this._perceive(p);
       case 'move_base':        return this._moveBase(p);
       case 'plan_arm_motion':  return this._planArmMotion(p);
       case 'grasp':            return this._grasp();
@@ -562,8 +568,20 @@ export class MCPToolExecutor {
     }
   }
 
+  _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
   // ── perceive ──
-  _perceive() {
+  async _perceive(p = {}) {
+    const query = (p && p.query ? String(p.query) : '').trim();
+    // 有 query → 下发到 Jetson 的 locate_anything_client (经 AgentPanel → /locate/query),
+    // 等待外置 LocateAnything 检测结果经 /industrial_tools/annotations 回传并注入 MockAgent.tools
+    if (query) {
+      if (this.onLocateQuery) {
+        try { this.onLocateQuery(query); } catch (e) { /* ignore */ }
+      }
+      this._log(`[perceive] LocateAnything query: ${query} (等待外置检测回传…)`);
+      await this._sleep(2500);
+    }
     const objs = this.agent._perceive();
     const armBase = new THREE.Vector3();
     this.robot.jointGroups['joint1'].getWorldPosition(armBase);
@@ -573,6 +591,7 @@ export class MCPToolExecutor {
     const held = this._getHeldObject();
     return {
       ok: true,
+      query: query || undefined,
       objects: objs.map(o => {
         const dist = Math.hypot(o.xyz[0] - armX, o.xyz[1] - armY, o.xyz[2] - armZ);
         const reachable = dist <= ARM_REACH;

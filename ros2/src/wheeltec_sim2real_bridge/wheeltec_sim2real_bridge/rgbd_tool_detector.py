@@ -224,6 +224,7 @@ class RgbdToolDetector(Node):
         self._last_warn = 0.0
         self._yolo_model = None
         self._yolo_backend = None
+        self._current_query = None  # NL prompt (LocateAnything client); None for pure YOLO
 
         # Subscriptions (RELIABLE QoS to match dynamic_bridge publisher)
         self.rgb_compressed = bool(self.get_parameter('rgb_compressed').value)
@@ -597,7 +598,7 @@ class RgbdToolDetector(Node):
         if cv2 is None:
             self._warn_throttled('python3-opencv is not installed')
             return
-        if self._yolo_model is None:
+        if self._yolo_model is None and self._yolo_backend != 'locate_anything_http':
             self._warn_throttled('YOLO model not loaded')
             return
         if self._rgb_msg is None or self._depth_msg is None:
@@ -727,8 +728,9 @@ class RgbdToolDetector(Node):
             'stamp': _stamp_to_float(self._rgb_msg.header.stamp),
             'frame_id': self._rgb_msg.header.frame_id or self.frame_id,
             'world_frame': self.world_frame if self._tf_available else None,
-            'detector': 'yolo',
+            'detector': self._yolo_backend or 'yolo',
             'yolo_backend': self._yolo_backend,
+            'query': self._current_query,
             'source': {
                 'rgb': self.rgb_topic,
                 'depth': self.depth_topic,

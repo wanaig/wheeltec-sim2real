@@ -11,6 +11,8 @@
  * 风格与 style.css 深色主题一致; 版本自适应 (ROS1/ROS2 消息类型字符串)。
  */
 import ROSLIB from 'roslib';
+import { TaskDecomposer } from './TaskDecomposer.js';
+import { SpeechRecognizer } from './SpeechRecognizer.js';
 
 const STR_TYPE = {
   ros1: 'std_msgs/String',
@@ -119,6 +121,7 @@ export class AgentPanel {
         <div class="ac-section">
           <div class="ac-row">
             <input type="text" id="ac-instr" placeholder="输入自然语言指令, 如 把左侧的扳手放到料箱第三格" />
+            <button id="ac-mic" class="ac-mic-btn" title="按住说话 (语音识别)">🎤</button>
             <button id="ac-send">发送</button>
             <button id="ac-stop" disabled style="background:#422;color:#F88;border:1px solid #644">停止</button>
           </div>
@@ -280,6 +283,55 @@ export class AgentPanel {
       }
     };
     llmRow.appendChild(btnTestLLM);
+
+    // 模式快捷切换 — 云端 API / 本地外置机大模型 (OpenAI 兼容, 推理在外置 RTX)
+    const modeRow = document.createElement('div');
+    modeRow.className = 'ac-llm-mode';
+    const inpHost = document.createElement('input');
+    inpHost.type = 'text';
+    inpHost.className = 'ac-llm-input ac-host';
+    inpHost.placeholder = '外置机 IP (本地模式)';
+    inpHost.value = localStorage.getItem('llm_local_host') || '192.168.0.100';
+    modeRow.appendChild(inpHost);
+    const btnCloud = document.createElement('button');
+    btnCloud.className = 'ac-llm-btn mode';
+    btnCloud.textContent = '☁ API';
+    btnCloud.onclick = () => {
+      btnCloud.classList.add('active');
+      btnLocal.classList.remove('active');
+      inpBase.value = 'https://api.openai.com/v1';
+      if (!inpModel.value || inpModel.value.startsWith('qwen')) inpModel.value = 'gpt-4o';
+      this._applyLLMConfig(inpBase.value, inpKey.value, inpModel.value);
+      this._pushLog(`[llm] 切换 → 云端 API 模式: base=${inpBase.value} model=${inpModel.value}`);
+    };
+    modeRow.appendChild(btnCloud);
+    const btnLocal = document.createElement('button');
+    btnLocal.className = 'ac-llm-btn mode';
+    btnLocal.textContent = '🖥 本地';
+    btnLocal.title = 'Ollama :11434/v1 (默认) / vLLM :8001/v1';
+    btnLocal.onclick = () => {
+      btnLocal.classList.add('active');
+      btnCloud.classList.remove('active');
+      const host = inpHost.value.trim() || '192.168.0.100';
+      inpBase.value = `http://${host}:11434/v1`;
+      inpModel.value = 'qwen2.5:3b';
+      if (!inpKey.value) inpKey.value = 'ollama';
+      localStorage.setItem('llm_local_host', host);
+      this._applyLLMConfig(inpBase.value, inpKey.value, inpModel.value);
+      this._pushLog(`[llm] 切换 → 本地外置机大模型: base=${inpBase.value} model=${inpModel.value} (vLLM 改 :8001/v1)`);
+    };
+    modeRow.appendChild(btnLocal);
+    // 初始 active 状态: 根据当前 apiBase 判断
+    {
+      const savedBase = (localStorage.getItem('llm_api_base') || '').toLowerCase();
+      if (savedBase.includes('127.0.0.1') || savedBase.includes('localhost') ||
+          savedBase.match(/\d+\.\d+\.\d+\.\d+/) || savedBase.includes(':11434') || savedBase.includes(':8001')) {
+        btnLocal.classList.add('active');
+      } else {
+        btnCloud.classList.add('active');
+      }
+    }
+    llmRow.appendChild(modeRow);
     quick.appendChild(llmRow);
 
     // 事件
@@ -291,6 +343,92 @@ export class AgentPanel {
     this.console.querySelector('#ac-collapse').addEventListener('click', () => {
       this.console.classList.toggle('collapsed');
     });
+
+    // 语音识别 (PTT 按住说话): 按下开始录音, 松开停止并上传到外置机 ASR
+    this._initSpeechRecognizer(inpHost);
+  }
+
+  /** 初始化语音识别模块 + PTT 事件绑定 */
+  _initSpeechRecognizer(inpHost) {
+    const micBtn = this.console.querySelector('#ac-mic');
+    if (!micBtn) return;
+
+    // ASR server URL: http://<外置机IP>:8766, 复用 LLM 模式区的外置机 IP 输入
+    const host = (inpHost && inpHost.value) || localStorage.getItem('llm_local_host') || '192.168.0.100';
+    this._speechRecognizer = new SpeechRecognizer({
+      serverUrl: `http://${host}:8766`,
+      onText: (text, meta) => this._onAsrText(text, meta),
+      onState: (state) => this._onAsrState(state),
+      onError: (msg) => this._onAsrError(msg),
+    });
+
+    // 浏览器不支持时禁用按钮
+    if (!this._speechRecognizer.isSupported()) {
+      micBtn.disabled = true;
+      micBtn.title = '浏览器不支持语音录制';
+      micBtn.style.opacity = '0.4';
+      return;
+    }
+
+    // 外置机 IP 变化时同步更新 ASR 地址
+    if (inpHost) {
+      inpHost.addEventListener('change', () => {
+        const h = inpHost.value.trim() || '192.168.0.100';
+        this._speechRecognizer.setServerUrl(`http://${h}:8766`);
+      });
+    }
+
+    // PTT: 按下开始录音, 松开停止并上传 (鼠标 + 触摸)
+    const startRec = (e) => { e.preventDefault(); this._speechRecognizer.start(); };
+    const stopRec = (e) => { e.preventDefault(); this._speechRecognizer.stop(); };
+    micBtn.addEventListener('mousedown', startRec);
+    micBtn.addEventListener('mouseup', stopRec);
+    micBtn.addEventListener('mouseleave', stopRec);
+    micBtn.addEventListener('touchstart', startRec, { passive: false });
+    micBtn.addEventListener('touchend', stopRec, { passive: false });
+  }
+
+  /** ASR 识别成功: 填入输入框并自动发送 */
+  _onAsrText(text, meta) {
+    const inp = this.console.querySelector('#ac-instr');
+    if (inp) inp.value = text;
+    const emoStr = meta && meta.emotion ? ` 情绪=${meta.emotion}` : '';
+    const langStr = meta && meta.language ? ` 语言=${meta.language}` : '';
+    this._pushLog(`[asr] 语音识别: "${text}"${langStr}${emoStr} (${meta ? Math.round(meta.latency_ms) : '?'}ms)`);
+    this._setBanner('🎤', '语音指令', text);
+    this.sendInstruction(text);
+  }
+
+  /** ASR 状态变化: 更新麦克风按钮视觉 */
+  _onAsrState(state) {
+    const micBtn = this.console.querySelector('#ac-mic');
+    if (!micBtn) return;
+    micBtn.classList.remove('recording', 'processing');
+    if (state === 'recording') {
+      micBtn.classList.add('recording');
+      micBtn.textContent = '◉';
+      micBtn.title = '录音中…松开发送';
+    } else if (state === 'processing') {
+      micBtn.classList.add('processing');
+      micBtn.textContent = '⏳';
+      micBtn.title = '识别中…';
+    } else {
+      micBtn.textContent = '🎤';
+      micBtn.title = '按住说话 (语音识别)';
+    }
+  }
+
+  /** ASR 错误 */
+  _onAsrError(msg) {
+    const micBtn = this.console.querySelector('#ac-mic');
+    if (micBtn) {
+      micBtn.textContent = '🎤';
+      micBtn.classList.remove('recording', 'processing');
+    }
+    this._pushLog(`[asr] ⚠ ${msg}`);
+    this._setBanner('⚠️', '语音识别失败', msg);
+    this.banner.classList.add('warn');
+    setTimeout(() => this.banner.classList.remove('warn'), 4000);
   }
 
   /** 停止运行中的 LLM 对话 */
@@ -349,6 +487,10 @@ export class AgentPanel {
     this._instrPub = new ROSLIB.Topic({
       ros: this.ros.ros, name: '/agent/instruction', messageType: t, queue_size: 10,
     });
+    // LocateAnything 自然语言 prompt 下发 (perceive(query) → Jetson locate_anything_client)
+    this._locateQueryPub = new ROSLIB.Topic({
+      ros: this.ros.ros, name: '/locate/query', messageType: t, queue_size: 10,
+    });
     this._toolAnnoSub = new ROSLIB.Topic({
       ros: this.ros.ros, name: '/industrial_tools/annotations', messageType: t, throttle_rate: 200,
     });
@@ -360,6 +502,21 @@ export class AgentPanel {
       if (s) { try { s.unsubscribe(); } catch (e) {} }
     });
     this._statusSub = null; this._logSub = null; this._toolAnnoSub = null;
+    this._locateQueryPub = null;
+  }
+
+  /** 下发 LocateAnything 自然语言 prompt 到 Jetson (/locate/query) */
+  publishLocateQuery(query) {
+    if (!this._locateQueryPub) {
+      this._pushLog('[locate] 未连接 ROS, 无法下发 prompt (前端将用虚拟场景感知)');
+      return;
+    }
+    try {
+      this._locateQueryPub.publish({ data: query || '' });
+      this._pushLog(`[locate] 已下发 prompt: ${query}`);
+    } catch (e) {
+      this._pushLog(`[locate] 下发失败: ${e.message}`);
+    }
   }
 
   /** ROS 版本切换后重建 (消息类型字符串变了) */
@@ -398,18 +555,61 @@ export class AgentPanel {
     this._llmAgent = agent;
   }
 
+  /** 设置指令解析模块 (InstructionParser) */
+  setInstructionParser(parser) {
+    this._instructionParser = parser;
+  }
+
+  /** 设置任务分解模块 (TaskDecomposer) */
+  setTaskDecomposer(decomposer) {
+    this._taskDecomposer = decomposer;
+  }
+
+  /** 保存 LLM 配置并同步到 agent + parser (供模式快捷按钮复用) */
+  _applyLLMConfig(base, key, model) {
+    localStorage.setItem('llm_api_base', base);
+    localStorage.setItem('llm_api_key', key);
+    localStorage.setItem('llm_model', model);
+    if (this._llmAgent) {
+      this._llmAgent.apiBase = base;
+      this._llmAgent.apiKey = key;
+      this._llmAgent.model = model;
+    }
+    if (this._instructionParser) this._instructionParser.setConfig({ apiBase: base, apiKey: key, model });
+    this._refreshLLMStatus();
+  }
+
   /** 发送自然语言指令 */
-  sendInstruction(text) {
+  async sendInstruction(text) {
     // 新任务 → 清空日志面板, 确保本次对话完整显示
     this._clearLog();
+    // 指令解析模块 (LLM 云端/本地外置机, 或正则回退)
+    // 提取 动作/目标工具/位置/料箱格 + 视觉定位 query, 并提前下发到 LocateAnything
+    let plan = null;
+    if (this._instructionParser) {
+      try {
+        plan = await this._instructionParser.parse(text);
+        if (plan && plan.ok) {
+          this._pushLog(`[NLU] 指令解析 (${plan.source}): 动作=${plan.action} 目标=${plan.target_tool || '按query定位'} 位置=${plan.side || '任意'} 格子=${plan.slot || '无'} query="${plan.query}"`);
+          if (plan.query) this.publishLocateQuery(plan.query);
+          // 任务序列分解: 生成显式步骤列表并展示
+          this._showTaskSteps(plan);
+        } else {
+          this._pushLog(`[NLU] 解析失败: ${plan?.reason || '未知'}, 交由智能体自行理解`);
+          this._clearTaskSteps();
+        }
+      } catch (e) {
+        this._pushLog(`[NLU] 解析异常: ${e.message}`);
+        this._clearTaskSteps();
+      }
+    }
     if (this._mockAgent) {
-      // Mock 模式: 直接调用浏览器内 agent
       this._pushLog(`[local] 已发送指令: ${text}`);
       this._setBanner('🗣️', '接收自然语言指令', text);
       this._busy = true;
       this.banner.classList.add('active');
       this._updateRunButtons(true);
-      this._mockAgent.run(text);
+      this._mockAgent.run(text, plan);
       return;
     }
     if (!this._instrPub || !this.ros.connected) {
@@ -446,6 +646,8 @@ export class AgentPanel {
 
   _onLog(line) {
     this._pushLog(line);
+    // 任务步骤进度跟踪
+    this._updateTaskStepsFromLog(line);
     // 解析阶段 → 更新字幕
     const ph = phaseFromLog(line);
     if (ph) this._setBanner(ph.icon, ph.text, ph.detail);
@@ -585,5 +787,146 @@ export class AgentPanel {
       const tag = o.real ? ' <span style="color:#4af">[YOLO]</span>' : '';
       return `<span class="ac-obj"><b>${o.class}</b> @[${o.xyz}]${conf}${bbox}${reach}${tag}</span>`;
     }).join('');
+  }
+
+  // ─────────────── 任务序列分解 (显式步骤列表) ───────────────
+
+  /** 生成并展示任务步骤列表 */
+  _showTaskSteps(plan) {
+    if (!this._taskDecomposer) return;
+    this._taskSteps = this._taskDecomposer.decompose(plan);
+    for (const s of this._taskSteps) s.retryCount = 0;
+    this._renderTaskSteps();
+  }
+
+  /** 清空任务步骤 */
+  _clearTaskSteps() {
+    this._taskSteps = null;
+    const el = document.querySelector('#ac-steps');
+    if (el) el.innerHTML = '—';
+  }
+
+  /** 渲染任务步骤列表 */
+  _renderTaskSteps() {
+    const el = document.querySelector('#ac-steps');
+    if (!el) return;
+    if (!this._taskSteps || !this._taskSteps.length) { el.innerHTML = '—'; return; }
+    const icons = { pending: '○', running: '◉', done: '✓', failed: '✗', skipped: '◌', retry: '↻' };
+    el.innerHTML = this._taskSteps.map(s => {
+      const opt = s.optional ? '<span class="ac-step-opt">可选</span>' : '';
+      const cond = s.conditional ? '<span class="ac-step-opt">条件</span>' : '';
+      const retry = s.retryCount > 0 ? `<span class="ac-step-opt">重试${s.retryCount}</span>` : '';
+      return `<div class="ac-step ac-step-${s.status}">
+        <span class="ac-step-icon">${icons[s.status] || '○'}</span>
+        <div class="ac-step-body">
+          <div class="ac-step-title">${s.id}. ${s.title} ${opt}${cond}${retry}</div>
+          <div class="ac-step-desc">${s.description}</div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  /** 从日志行更新任务步骤状态 */
+  _updateTaskStepsFromLog(line) {
+    if (!this._taskSteps || !this._taskSteps.length) return;
+
+    // [replan] → 失败重试步骤触发
+    if (line.startsWith('[replan]')) {
+      const replanStep = this._taskSteps.find(s => s.tool === 'replan' && s.status !== 'done');
+      if (replanStep) {
+        this._markStepRunning(replanStep);
+        for (const s of this._taskSteps) {
+          if (s.tool === 'grasp' || s.tool === 'release' || s.tool === 'plan_arm_motion') {
+            if (s.status === 'done') s.status = 'pending';
+          }
+        }
+        this._renderTaskSteps();
+      }
+      return;
+    }
+
+    // <<< 结果: done/failed → 全部收尾
+    if (line.startsWith('<<< 结果')) {
+      const ok = line.includes('done');
+      for (const s of this._taskSteps) {
+        if (s.status === 'running' || s.status === 'retry') s.status = ok ? 'done' : 'failed';
+        else if (s.status === 'pending' && !s.conditional) s.status = ok ? 'skipped' : 'pending';
+      }
+      this._renderTaskSteps();
+      return;
+    }
+
+    // NLU 模式: [nlu] 步骤N:
+    const nluStep = TaskDecomposer?.parseNLUStep?.(line);
+    if (nluStep) {
+      const tool = TaskDecomposer.NLU_STEP_TOOLS[nluStep];
+      if (tool) {
+        const prevRunning = this._taskSteps.find(s => s.status === 'running');
+        if (prevRunning) prevRunning.status = 'done';
+        const target = this._findNextPending(tool);
+        if (target) target.status = 'running';
+        this._renderTaskSteps();
+      }
+      return;
+    }
+
+    // LLM 模式: [MCP] 日志
+    const mcp = TaskDecomposer?.parseMCPLog?.(line);
+    if (!mcp) return;
+
+    if (mcp.type === 'call') {
+      // 1. 先找 failed (重试当前阶段失败的同名步骤)
+      const failedStep = this._taskSteps.find(s => s.tool === mcp.tool && s.status === 'failed');
+      if (failedStep) {
+        // 重试: 标记前一个 running/retry 步骤为完成, 再显示 ↻ 重试中
+        const prevRunning = this._taskSteps.find(s => s.status === 'running' || s.status === 'retry');
+        if (prevRunning && prevRunning !== failedStep) prevRunning.status = 'done';
+        failedStep.retryCount = (failedStep.retryCount || 0) + 1;
+        failedStep.status = 'retry';
+        this._renderTaskSteps();
+        return;
+      }
+      // 2. 再找 pending (新步骤), 但只在 high water mark 之后
+      let target = this._findNextPending(mcp.tool);
+      if (target) {
+        const prevRunning = this._taskSteps.find(s => s.status === 'running' || s.status === 'retry');
+        if (prevRunning && prevRunning !== target) prevRunning.status = 'done';
+        target.status = 'running';
+        this._renderTaskSteps();
+      }
+    } else if (mcp.type === 'result') {
+      const target = this._taskSteps.find(s => s.tool === mcp.tool && (s.status === 'running' || s.status === 'retry'));
+      if (target) {
+        target.status = mcp.ok ? 'done' : 'failed';
+        this._renderTaskSteps();
+      }
+    }
+  }
+
+  /**
+   * 在 high water mark (最后一个 done/skipped 步骤) 之后,
+   * 找第一个 pending 且 tool 匹配的步骤。
+   * 这样步骤2 (grasp阶段 move_base) 未执行时, 步骤7 (place阶段) 失败后
+   * move_base 会正确匹配步骤6而非步骤2。
+   */
+  _findNextPending(tool) {
+    let hwm = -1;
+    for (let i = 0; i < this._taskSteps.length; i++) {
+      const st = this._taskSteps[i].status;
+      if (st === 'done' || st === 'skipped') hwm = i;
+    }
+    for (let i = hwm + 1; i < this._taskSteps.length; i++) {
+      if (this._taskSteps[i].tool === tool && this._taskSteps[i].status === 'pending') {
+        return this._taskSteps[i];
+      }
+    }
+    return null;
+  }
+
+  /** 标记步骤为 running */
+  _markStepRunning(step) {
+    if (!step) return;
+    step.status = 'running';
+    this._renderTaskSteps();
   }
 }

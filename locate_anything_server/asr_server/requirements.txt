@@ -1,0 +1,19 @@
+# -- HTTP service core --
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+python-multipart>=0.0.6
+
+# -- SenseVoice (primary backend) via FunASR --
+# torch must be installed first per your CUDA version: https://pytorch.org/get-started/locally
+torch>=2.0.0
+torchaudio>=2.0.0
+funasr>=1.0.27
+modelscope>=1.10.0       # model download hub (iic/SenseVoiceSmall)
+librosa>=0.10.0          # audio loading fallback
+
+# -- Whisper fallback backend (only needed if BACKEND=whisper) --
+faster-whisper>=1.0.0
+ctranslate2>=4.0.0
+
+# -- system dependency (not pip): ffmpeg must be on PATH for webm→wav decode --

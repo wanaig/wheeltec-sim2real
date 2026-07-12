@@ -24,6 +24,14 @@
                                           需 pip install ultralytics; 未安装时自动回退到 yolov5s.pt
     yolo_conf         (float, 默认 0.45)   YOLO 置信度阈值
     yolo_device       (str,  默认 'cuda:0') YOLO 推理设备 (cuda:0 / cpu)
+    locate_anything   (bool, 默认 False) 启动 LocateAnything 外置推理客户端 (替代 rgbd_detector)。
+                                          Jetson 把 RGB+prompt 发到外置 RTX 的 server.py, 收 2D bbox,
+                                          本地 depth+TF 做 2D->3D 反投影, 发同样的 annotations 话题。
+                                          需 astra_hand:=true + 外置机运行 server.py。与 rgbd_detector 二选一。
+    la_server_url     (str,  默认 http://192.168.0.100:8765) 外置机 LocateAnything HTTP 地址
+    la_http_timeout   (float,默认 3.0)   HTTP 请求超时 (秒)
+    la_default_prompt (str,  默认 '')    默认 prompt (空=不检测, 等前端 /locate/query)
+    locate_query_topic(str,  默认 /locate/query) 自然语言 prompt 输入话题 (前端 LLM 发布)
     port              (int,  默认 9090)  rosbridge 端口
     jsp               (bool, 默认 False) 启动 joint_state_publisher
     use_rviz          (bool, 默认 False) 启动 rviz2
@@ -37,6 +45,9 @@
     ros2 launch wheeltec_sim2real_bridge bringup.launch.py astra_hand:=true echo_joint_states:=true
     # 真机 + Astra + YOLO RGB-D 工业检测 (完整工业感知)
     ros2 launch wheeltec_sim2real_bridge bringup.launch.py astra_hand:=true rgbd_detector:=true echo_joint_states:=true
+    # 真机 + Astra + LocateAnything 外置推理 (开放词汇, 跑在外置 RTX 上)
+    ros2 launch wheeltec_sim2real_bridge bringup.launch.py astra_hand:=true locate_anything:=true \
+        la_server_url:=http://192.168.0.100:8765 echo_joint_states:=true
     # 无硬件全链路测试 (含相机彩条)
     ros2 launch wheeltec_sim2real_bridge bringup.launch.py mock:=true
 """
@@ -87,6 +98,17 @@ def generate_launch_description():
         'yolo_device', default_value='cuda:0')
     yolo_imgsz_arg = DeclareLaunchArgument(
         'yolo_imgsz', default_value='640')
+    # LocateAnything (external GPU) client
+    locate_anything_arg = DeclareLaunchArgument(
+        'locate_anything', default_value='false')
+    la_server_url_arg = DeclareLaunchArgument(
+        'la_server_url', default_value='http://192.168.0.100:8765')
+    la_http_timeout_arg = DeclareLaunchArgument(
+        'la_http_timeout', default_value='3.0')
+    la_default_prompt_arg = DeclareLaunchArgument(
+        'la_default_prompt', default_value='')
+    locate_query_topic_arg = DeclareLaunchArgument(
+        'locate_query_topic', default_value='/locate/query')
     port_arg = DeclareLaunchArgument('port', default_value='9090')
     jsp_arg = DeclareLaunchArgument('jsp', default_value='false')
     rviz_arg = DeclareLaunchArgument('use_rviz', default_value='false')
@@ -205,6 +227,39 @@ def generate_launch_description():
         )],
     )
 
+    # 5b. LocateAnything (external GPU) perception: Jetson sends RGB+prompt to
+    #     the off-board HTTP server (server.py), receives 2D bboxes, does 2D->3D
+    #     back-projection locally (depth + TF), publishes the SAME annotations
+    #     topic as rgbd_tool_detector. Use this OR rgbd_detector, not both.
+    #     Requires astra_hand:=true for the RGB-D stream.
+    locate_anything_node = TimerAction(
+        period=25.0,
+        actions=[Node(
+            package='wheeltec_sim2real_bridge',
+            executable='locate_anything_client',
+            name='locate_anything_client',
+            output='screen',
+            parameters=[{
+                'rgb_topic': LaunchConfiguration('rgbd_rgb_topic'),
+                'depth_topic': LaunchConfiguration('rgbd_depth_topic'),
+                'camera_info_topic': LaunchConfiguration('rgbd_camera_info_topic'),
+                'depth_compressed': LaunchConfiguration('rgbd_depth_compressed'),
+                'rgb_compressed': LaunchConfiguration('rgbd_rgb_compressed'),
+                'server_url': LaunchConfiguration('la_server_url'),
+                'http_timeout_s': LaunchConfiguration('la_http_timeout'),
+                'default_prompt': LaunchConfiguration('la_default_prompt'),
+                'query_topic': LaunchConfiguration('locate_query_topic'),
+                'hand_cam_x': LaunchConfiguration('hand_cam_x'),
+                'hand_cam_y': LaunchConfiguration('hand_cam_y'),
+                'hand_cam_z': LaunchConfiguration('hand_cam_z'),
+                'hand_cam_roll': LaunchConfiguration('hand_cam_roll'),
+                'hand_cam_pitch': LaunchConfiguration('hand_cam_pitch'),
+                'hand_cam_yaw': LaunchConfiguration('hand_cam_yaw'),
+            }],
+            condition=IfCondition(LaunchConfiguration('locate_anything')),
+        )],
+    )
+
     # 6. Astra S 手眼相机链路 (ROS1 astra_camera + ros1_bridge -> ROS2)
     #    独立脚本以前台 supervise 模式运行: roscore + astra + republish + dynamic_bridge
     #    launch 退出 (Ctrl+C) 时脚本捕获信号清理全部子进程
@@ -255,10 +310,12 @@ def generate_launch_description():
         rgbd_rgb_topic_arg, rgbd_depth_topic_arg, rgbd_camera_info_topic_arg,
         rgbd_depth_compressed_arg, rgbd_rgb_compressed_arg,
         yolo_model_arg, yolo_conf_arg, yolo_device_arg, yolo_imgsz_arg,
+        locate_anything_arg, la_server_url_arg, la_http_timeout_arg,
+        la_default_prompt_arg, locate_query_topic_arg,
         port_arg, jsp_arg, rviz_arg, echo_arg, params_arg, astra_hand_arg,
         hand_cam_x_arg, hand_cam_y_arg, hand_cam_z_arg,
         hand_cam_roll_arg, hand_cam_pitch_arg, hand_cam_yaw_arg,
         arm_display, serial_node, mock_node, rosbridge_node, camera_node,
-        rgbd_detector_node, astra_hand_proc, hand_camera_tf,
-        hand_camera_optical_tf,
+        rgbd_detector_node, locate_anything_node, astra_hand_proc,
+        hand_camera_tf, hand_camera_optical_tf,
     ])

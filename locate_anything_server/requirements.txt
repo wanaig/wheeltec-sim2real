@@ -1,0 +1,26 @@
+# -- HTTP service core --
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+python-multipart>=0.0.6
+numpy>=1.20.0
+opencv-python-headless>=4.5.0
+
+# -- NVIDIA LocateAnything-3B (official pin from the model card) --
+# torch must be installed first per your CUDA version: https://pytorch.org/get-started/locally
+torch>=2.0.0
+torchvision>=0.15.0
+transformers==4.57.1
+peft
+decord==0.6.0
+lmdb==1.7.5
+Pillow>=9.0.0
+
+# -- HuggingFace model download --
+huggingface_hub>=0.20.0
+
+# -- optional: YOLO-World fallback backend --
+ultralytics>=8.1.0
+
+# -- optional: GroundingDINO fallback backend --
+accelerate>=0.20.0
